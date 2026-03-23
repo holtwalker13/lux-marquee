@@ -18,6 +18,7 @@ import {
   haversineMiles,
   isOutsideServiceRadius,
 } from "@/lib/service-area";
+import { ensurePriceGlyphsSeeded } from "@/lib/ensure-price-glyphs";
 import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 
 const EVENT_TYPES = new Set(["wedding", "baby_shower", "birthday", "other"]);
@@ -154,7 +155,21 @@ export async function POST(req: Request) {
     postalCode: eventPostalCode,
   });
 
-  const hit = await geocodeAddressQuery(geoQuery);
+  let hit: Awaited<ReturnType<typeof geocodeAddressQuery>>;
+  try {
+    hit = await geocodeAddressQuery(geoQuery);
+  } catch (e) {
+    console.error("[submissions POST] geocode", e);
+    return NextResponse.json(
+      {
+        error: "Address lookup failed. Try again in a moment.",
+        ...(process.env.NODE_ENV !== "production" && {
+          details: e instanceof Error ? e.message : String(e),
+        }),
+      },
+      { status: 503 },
+    );
+  }
   if (!hit) {
     return NextResponse.json(
       {
@@ -172,29 +187,31 @@ export async function POST(req: Request) {
   const distanceRounded = Math.round(distanceMiles * 10) / 10;
   const outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
 
-  const rows = await prisma.priceGlyph.findMany({
-    where: { active: true },
-    select: { glyph: true, priceCents: true },
-  });
-  const version = computePriceTableVersion(rows);
-  const priceMap = new Map(rows.map((r) => [r.glyph, r.priceCents]));
-
-  const normalized = normalizeLettering(letteringRaw);
-  const est = estimateFromPriceMap(normalized, priceMap);
-  if (!est.ok) {
-    return NextResponse.json({ error: est.error.message }, { status: 400 });
-  }
-
-  const metadata = buildMetadata(notesRaw, {
-    geocodedLabel: hit.displayName,
-    serviceBaseLabel: SERVICE_BASE.label,
-    serviceRadiusMiles: SERVICE_RADIUS_MILES,
-    travelSurchargeApplies: outsideServiceRadius,
-    outdoorSetupPremium: setupOutdoor,
-    googleSheetsPendingTabQueued: isGoogleSheetsConfigured(),
-  });
-
   try {
+    await ensurePriceGlyphsSeeded(prisma);
+
+    const rows = await prisma.priceGlyph.findMany({
+      where: { active: true },
+      select: { glyph: true, priceCents: true },
+    });
+    const version = computePriceTableVersion(rows);
+    const priceMap = new Map(rows.map((r) => [r.glyph, r.priceCents]));
+
+    const normalized = normalizeLettering(letteringRaw);
+    const est = estimateFromPriceMap(normalized, priceMap);
+    if (!est.ok) {
+      return NextResponse.json({ error: est.error.message }, { status: 400 });
+    }
+
+    const metadata = buildMetadata(notesRaw, {
+      geocodedLabel: hit.displayName,
+      serviceBaseLabel: SERVICE_BASE.label,
+      serviceRadiusMiles: SERVICE_RADIUS_MILES,
+      travelSurchargeApplies: outsideServiceRadius,
+      outdoorSetupPremium: setupOutdoor,
+      googleSheetsPendingTabQueued: isGoogleSheetsConfigured(),
+    });
+
     const created = await prisma.contactSubmission.create({
       data: {
         contactName,
@@ -237,10 +254,15 @@ export async function POST(req: Request) {
       },
       { status: 201 },
     );
-  } catch {
-    return NextResponse.json(
-      { error: "Could not save your request. Try again later." },
-      { status: 500 },
-    );
+  } catch (e) {
+    console.error("[submissions POST]", e);
+    const body: {
+      error: string;
+      details?: string;
+    } = { error: "Could not save your request. Try again later." };
+    if (process.env.NODE_ENV !== "production") {
+      body.details = e instanceof Error ? e.message : String(e);
+    }
+    return NextResponse.json(body, { status: 500 });
   }
 }

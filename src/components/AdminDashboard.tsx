@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { buildVenmoChargeUrl, depositAmountDollars } from "@/lib/venmo-deposit";
 
 type Submission = {
   id: string;
@@ -37,6 +38,17 @@ function centsToDollars(cents: number | null): string {
   return (cents / 100).toFixed(2);
 }
 
+const DEPOSIT_USD = depositAmountDollars();
+const DEPOSIT_CENTS = DEPOSIT_USD * 100;
+
+const PIPELINE_ORDER: Record<string, number> = {
+  pending_request: 0,
+  deposit_requested: 1,
+  deposit_paid: 2,
+  booked: 3,
+  cancelled: 4,
+};
+
 function downloadIcs(content: string) {
   const blob = new Blob([content], { type: "text/calendar;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -45,6 +57,207 @@ function downloadIcs(content: string) {
   a.download = "marquee-booking.ics";
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function sortedSubmissions(list: Submission[]): Submission[] {
+  return [...list].sort((a, b) => {
+    const da = PIPELINE_ORDER[a.pipelineStatus] ?? 99;
+    const db = PIPELINE_ORDER[b.pipelineStatus] ?? 99;
+    if (da !== db) return da - db;
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+}
+
+function parseDraftDollarsToCents(s: string): number | null {
+  const t = s.trim();
+  if (!t) return null;
+  const n = Number.parseFloat(t.replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+function formatMoneyCents(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+
+function proposedCentsForSub(sub: Submission, draftProposed: string): number | null {
+  return parseDraftDollarsToCents(draftProposed) ?? sub.proposedAmountCents;
+}
+
+function formatEventDateLong(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatTime12h(hhmm: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return hhmm;
+  let h = Number(m[1]);
+  const min = m[2];
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${min} ${ap}`;
+}
+
+function eventTypeLabel(raw: string): string {
+  return raw.replace(/_/g, " ");
+}
+
+function IconCalendar({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+    </svg>
+  );
+}
+
+function IconClock({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+
+function IconMapPin({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 21s7-4.35 7-10a7 7 0 1 0-14 0c0 5.65 7 10 7 10z" />
+      <circle cx="12" cy="11" r="2.5" />
+    </svg>
+  );
+}
+
+function LetteringPerLetter({ text, compact }: { text: string; compact?: boolean }) {
+  if (text.length === 0) {
+    return (
+      <span
+        className={`font-[family-name:var(--font-display)] font-semibold text-[var(--cocoa-muted)] ${compact ? "text-lg" : "text-2xl"}`}
+      >
+        —
+      </span>
+    );
+  }
+  const cell = compact
+    ? "min-h-[1.65rem] min-w-[1.35rem] px-1 py-0 text-lg"
+    : "min-h-[2.25rem] min-w-[1.6rem] px-1.5 py-0.5 text-2xl";
+  return (
+    <>
+      {[...text].map((ch, i) => (
+        <span
+          key={i}
+          className={`inline-flex items-center justify-center rounded-md border border-dotted border-[var(--coral)]/85 bg-gradient-to-b from-white to-[#fff3ee] font-[family-name:var(--font-display)] font-semibold tracking-normal text-[var(--cocoa)] shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] ring-1 ring-[#f0d9d2]/60 ${cell}`}
+          title={ch === " " ? "space" : ch}
+        >
+          {ch === " " ? "\u00a0" : ch}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function compactLocationLine(sub: Submission): string {
+  const citySt = [sub.eventCity, sub.eventState].filter(Boolean).join(", ");
+  const tail = sub.setupOutdoor ? "outdoor" : "indoor";
+  return [citySt, sub.eventAddressLine1, tail].filter(Boolean).join(" · ");
+}
+
+function ChevronDetails({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+type ParseResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; message: string };
+
+async function parseJsonBody<T>(res: Response, label: string): Promise<ParseResult<T>> {
+  const text = await res.text();
+  if (!text.trim()) {
+    return {
+      ok: false,
+      message: `${label} returned an empty body (HTTP ${res.status}). Check the terminal running \`next dev\` for server errors.`,
+    };
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(text) as T & { error?: string; details?: string };
+  } catch {
+    return {
+      ok: false,
+      message: `${label} returned non-JSON (HTTP ${res.status}). The route may have crashed or returned an HTML error page.`,
+    };
+  }
+  const obj = data as T & { error?: string; details?: string };
+  if (!res.ok) {
+    const msg =
+      typeof obj.error === "string" && obj.error.trim()
+        ? obj.error
+        : `${label} failed (HTTP ${res.status}).`;
+    const details =
+      typeof obj.details === "string" && obj.details.trim() ? obj.details.trim() : "";
+    return {
+      ok: false,
+      message: details ? `${msg}\n\n${details}` : msg,
+    };
+  }
+  return { ok: true, data: obj as T };
 }
 
 export function AdminDashboard() {
@@ -61,33 +274,62 @@ export function AdminDashboard() {
   const [drafts, setDrafts] = useState<
     Record<string, { proposed: string; venmo: string }>
   >({});
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [sRes, iRes] = await Promise.all([
-      fetch("/api/admin/submissions"),
-      fetch("/api/admin/inventory"),
-    ]);
-    if (sRes.status === 401 || iRes.status === 401) {
-      router.push("/admin/login");
-      return;
+    setLoadError(null);
+    setLoading(true);
+    try {
+      const [sRes, iRes] = await Promise.all([
+        fetch("/api/admin/submissions", { credentials: "same-origin" }),
+        fetch("/api/admin/inventory", { credentials: "same-origin" }),
+      ]);
+
+      if (sRes.status === 401 || iRes.status === 401) {
+        router.push("/admin/login");
+        return;
+      }
+
+      const sParsed = await parseJsonBody<{
+        submissions?: Submission[];
+        error?: string;
+      }>(sRes, "submissions");
+      const iParsed = await parseJsonBody<{
+        letters?: InvLetter[];
+        source?: string;
+        error?: string;
+      }>(iRes, "inventory");
+
+      if (!sParsed.ok) {
+        setLoadError(sParsed.message);
+        return;
+      }
+      if (!iParsed.ok) {
+        setLoadError(iParsed.message);
+        return;
+      }
+
+      const sData = sParsed.data;
+      const iData = iParsed.data;
+
+      setSubmissions(sortedSubmissions(sData.submissions ?? []));
+      setLetters(iData.letters ?? []);
+      setInvSource(iData.source ?? "");
+      const nextDrafts: Record<string, { proposed: string; venmo: string }> = {};
+      for (const sub of sData.submissions ?? []) {
+        nextDrafts[sub.id] = {
+          proposed: centsToDollars(sub.proposedAmountCents),
+          venmo: sub.venmoHandle ?? "",
+        };
+      }
+      setDrafts(nextDrafts);
+    } catch (e) {
+      setLoadError(
+        e instanceof Error ? e.message : "Something went wrong loading the admin data.",
+      );
+    } finally {
+      setLoading(false);
     }
-    const sData = (await sRes.json()) as { submissions?: Submission[] };
-    const iData = (await iRes.json()) as {
-      letters?: InvLetter[];
-      source?: string;
-    };
-    setSubmissions(sData.submissions ?? []);
-    setLetters(iData.letters ?? []);
-    setInvSource(iData.source ?? "");
-    const nextDrafts: Record<string, { proposed: string; venmo: string }> = {};
-    for (const sub of sData.submissions ?? []) {
-      nextDrafts[sub.id] = {
-        proposed: centsToDollars(sub.proposedAmountCents),
-        venmo: sub.venmoHandle ?? "",
-      };
-    }
-    setDrafts(nextDrafts);
-    setLoading(false);
   }, [router]);
 
   useEffect(() => {
@@ -163,10 +405,37 @@ export function AdminDashboard() {
   }
 
   async function requestDeposit(id: string) {
+    const d = drafts[id];
+    const venmo = d?.venmo?.trim();
+    if (!venmo) {
+      alert(
+        `Add the client's Venmo @handle in the field below, then try again. (We'll save your proposed $ and handle for you.)`,
+      );
+      return;
+    }
+
+    const patchRes = await fetch(`/api/admin/submissions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        proposedAmountDollars: d?.proposed || null,
+        venmoHandle: venmo,
+      }),
+    });
+    if (!patchRes.ok) {
+      const err = (await patchRes.json()) as { error?: string };
+      alert(err.error ?? "Could not save quote / Venmo.");
+      return;
+    }
+
     const res = await fetch(`/api/admin/submissions/${id}/request-deposit`, {
       method: "POST",
     });
-    const data = (await res.json()) as { error?: string; venmoUrl?: string };
+    const data = (await res.json()) as {
+      error?: string;
+      venmoUrl?: string;
+      depositAmountDollars?: number;
+    };
     if (!res.ok) {
       alert(data.error ?? "Failed");
       return;
@@ -218,8 +487,55 @@ export function AdminDashboard() {
     await load();
   }
 
+  function openVenmoRemainder(sub: Submission) {
+    const d = drafts[sub.id];
+    const venmo = d?.venmo?.trim();
+    if (!venmo) {
+      alert("Add the client's Venmo @handle first.");
+      return;
+    }
+    const proposed = proposedCentsForSub(sub, d?.proposed ?? "");
+    if (proposed == null) {
+      alert("Enter a proposed total so we can calculate the remainder.");
+      return;
+    }
+    const remainder = Math.max(0, proposed - DEPOSIT_CENTS);
+    if (remainder <= 0) {
+      alert(
+        `No balance after the $${DEPOSIT_USD} deposit — proposed total must be more than $${DEPOSIT_USD}.`,
+      );
+      return;
+    }
+    const url = buildVenmoChargeUrl(
+      venmo,
+      remainder / 100,
+      `Marquee balance (${sub.letteringRaw.slice(0, 60)})`,
+    );
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
   if (loading) {
     return <p className="text-[var(--cocoa-muted)]">Loading…</p>;
+  }
+
+  if (loadError) {
+    return (
+      <div className="max-w-lg space-y-4 rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6">
+        <h1 className="font-[family-name:var(--font-display)] text-2xl text-[var(--cocoa)]">
+          Couldn&apos;t load admin data
+        </h1>
+        <p className="whitespace-pre-wrap text-sm text-[var(--cocoa-muted)]">
+          {loadError}
+        </p>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white"
+        >
+          Try again
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -321,41 +637,45 @@ export function AdminDashboard() {
         )}
       </section>
 
-      <section className="space-y-6">
-        <h2 className="font-semibold text-[var(--cocoa)]">Submitted requests</h2>
-        {submissions.map((sub) => (
-          <article
-            key={sub.id}
-            className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6 shadow-sm"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="font-mono text-xs text-[var(--cocoa-muted)]">
-                  {sub.id}
-                </p>
-                <p className="text-lg font-semibold text-[var(--cocoa)]">
-                  {sub.contactName} · {sub.contactEmail}
-                </p>
-                <p className="text-sm text-[var(--cocoa-muted)]">
-                  {sub.eventType} · {sub.eventDate.slice(0, 10)} @{" "}
-                  {sub.eventTimeLocal} · {sub.letteringRaw}
-                </p>
-                <p className="text-xs text-[var(--cocoa-muted)]">
-                  {sub.eventAddressLine1}, {sub.eventCity}, {sub.eventState}{" "}
-                  {sub.eventPostalCode}
-                  {sub.setupOutdoor ? " · outdoor setup" : " · indoor"}
-                </p>
-              </div>
-              <span className="rounded-full bg-[var(--blush)] px-3 py-1 text-xs font-bold uppercase text-[var(--cocoa)]">
-                {sub.pipelineStatus.replace(/_/g, " ")}
-              </span>
-            </div>
+      <section className="space-y-4">
+        <div>
+          <h2 className="font-semibold text-[var(--cocoa)]">Submitted requests</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--cocoa-muted)]">
+            <strong className="text-[var(--cocoa)]">Workflow:</strong> (1) Enter{" "}
+            <strong>proposed total</strong> and the client&apos;s{" "}
+            <strong>Venmo @handle</strong>. (2){" "}
+            <strong>Send ${DEPOSIT_USD} deposit request</strong> opens Venmo with a
+            charge link—the client completes payment there (Venmo has no API to auto-request
+            money). <strong>Open Venmo for remainder</strong> uses proposed total − $
+            {DEPOSIT_USD} and stays available <strong>any time</strong> (even after booking)
+            until you cancel the job. (3) When you&apos;ve seen the ${DEPOSIT_USD} in Venmo,
+            click <strong>Mark deposit paid</strong>. (4){" "}
+            <strong>Confirm booking</strong> (after deposit) emails a calendar{" "}
+            <strong>.ics</strong> to the client and <strong>BUSINESS_OWNER_EMAIL</strong>{" "}
+            (set <strong>Resend</strong> in
+            <code className="mx-1 rounded bg-[var(--cream)] px-1 text-xs">.env</code>
+            ), and <strong>locks letters</strong> for this event: each A–Z in the phrase is
+            reserved for <strong>12 hours before through 12 hours after</strong> the event
+            time (overlap checks; sheet quantities are not reduced).
+          </p>
+        </div>
+        {submissions.map((sub) => {
+          const draft = drafts[sub.id];
+          const proposedCents = proposedCentsForSub(sub, draft?.proposed ?? "");
+          const remainderCents =
+            proposedCents != null ? Math.max(0, proposedCents - DEPOSIT_CENTS) : null;
+          const depositPaid =
+            sub.depositPaidAt != null ||
+            sub.pipelineStatus === "deposit_paid" ||
+            sub.pipelineStatus === "booked";
+          const depositAwaiting =
+            !depositPaid &&
+            (sub.pipelineStatus === "deposit_requested" || sub.depositRequestedAt != null);
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="block text-sm">
-                <span className="font-semibold text-[var(--cocoa)]">
-                  Proposed total ($)
-                </span>
+          const quoteInputs = (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="block text-xs">
+                <span className="font-semibold text-[var(--cocoa)]">Proposed ($)</span>
                 <input
                   value={drafts[sub.id]?.proposed ?? ""}
                   onChange={(e) =>
@@ -367,14 +687,12 @@ export function AdminDashboard() {
                       },
                     }))
                   }
-                  className="mt-1 w-full rounded-xl border border-[var(--blush)] px-3 py-2"
+                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm"
                   placeholder="0.00"
                 />
               </label>
-              <label className="block text-sm">
-                <span className="font-semibold text-[var(--cocoa)]">
-                  Venmo @handle
-                </span>
+              <label className="block text-xs">
+                <span className="font-semibold text-[var(--cocoa)]">Venmo @</span>
                 <input
                   value={drafts[sub.id]?.venmo ?? ""}
                   onChange={(e) =>
@@ -386,19 +704,99 @@ export function AdminDashboard() {
                       },
                     }))
                   }
-                  className="mt-1 w-full rounded-xl border border-[var(--blush)] px-3 py-2"
-                  placeholder="YourStudioName"
+                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm"
+                  placeholder="handle"
                 />
+                <span className="mt-0.5 block text-[10px] leading-tight text-[var(--cocoa-muted)]">
+                  Client handle for deposit + balance.
+                </span>
               </label>
             </div>
+          );
 
-            <div className="mt-4 flex flex-wrap gap-2">
+          const pricingStack = (
+            <div className="space-y-3 rounded-2xl border border-[var(--blush)] bg-[var(--cream)]/40 p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-sm font-semibold text-[var(--cocoa)]">
+                  Proposed total
+                </span>
+                <span className="font-mono text-lg font-bold tabular-nums text-[var(--cocoa)]">
+                  {proposedCents != null ? (
+                    <>${formatMoneyCents(proposedCents)}</>
+                  ) : (
+                    <span className="text-sm font-normal text-[var(--cocoa-muted)]">
+                      Enter amount in details
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--blush)]/80 pt-3">
+                <span className="text-sm font-semibold text-[var(--cocoa)]">
+                  Deposit ({`$${DEPOSIT_USD}`})
+                </span>
+                <span className="inline-flex items-center gap-2 text-sm font-medium">
+                  {depositPaid ? (
+                    <>
+                      <span
+                        className="flex size-7 items-center justify-center rounded-full bg-emerald-500 text-white"
+                        title="Deposit received"
+                      >
+                        ✓
+                      </span>
+                      <span className="text-emerald-800">Received</span>
+                    </>
+                  ) : depositAwaiting ? (
+                    <>
+                      <span
+                        className="flex size-7 items-center justify-center rounded-full border-2 border-amber-500 text-amber-700"
+                        title="Awaiting client payment"
+                      >
+                        ○
+                      </span>
+                      <span className="text-amber-900">Awaiting payment</span>
+                    </>
+                  ) : (
+                    <>
+                      <span
+                        className="flex size-7 items-center justify-center rounded-full border border-[var(--blush)] text-[var(--cocoa-muted)]"
+                        title="Deposit not requested"
+                      >
+                        —
+                      </span>
+                      <span className="text-[var(--cocoa-muted)]">Not requested</span>
+                    </>
+                  )}
+                </span>
+              </div>
+              {proposedCents != null && (
+                <div className="space-y-1 border-t border-[var(--blush)]/80 pt-3 font-mono text-sm tabular-nums text-[var(--cocoa)]">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-[var(--cocoa-muted)]">Proposed</span>
+                    <span>${formatMoneyCents(proposedCents)}</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-[var(--cocoa-muted)]">− Deposit</span>
+                    <span>− ${formatMoneyCents(DEPOSIT_CENTS)}</span>
+                  </div>
+                  <div className="flex justify-between gap-4 border-t border-dashed border-[var(--blush)] pt-2 text-base font-bold">
+                    <span>Remainder (Venmo)</span>
+                    <span className="text-[var(--coral)]">
+                      ${formatMoneyCents(remainderCents ?? 0)}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+
+          const actionGrid = (
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => void saveDraft(sub.id)}
-                className="rounded-xl border border-[var(--blush)] px-3 py-2 text-sm font-semibold"
+                className="rounded-xl border border-[var(--blush)] px-2 py-2.5 text-center text-xs font-semibold leading-snug sm:text-sm"
               >
-                Save quote & Venmo
+                Save quote &amp; Venmo only
               </button>
               <button
                 type="button"
@@ -407,15 +805,16 @@ export function AdminDashboard() {
                   sub.pipelineStatus === "booked" ||
                   sub.pipelineStatus === "cancelled"
                 }
-                className="rounded-xl bg-[#008cff] px-3 py-2 text-sm font-bold text-white disabled:opacity-40"
+                className="rounded-xl bg-[#008cff] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
+                title="Saves fields, then opens Venmo charge link"
               >
-                Send $100 deposit request (opens Venmo)
+                Send ${DEPOSIT_USD} deposit (Venmo)
               </button>
               <button
                 type="button"
                 onClick={() => void markDepositPaid(sub.id)}
                 disabled={sub.pipelineStatus !== "deposit_requested"}
-                className="rounded-xl bg-amber-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-40"
+                className="rounded-xl bg-amber-600 px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
               >
                 Mark deposit paid
               </button>
@@ -423,13 +822,275 @@ export function AdminDashboard() {
                 type="button"
                 onClick={() => void confirmBooking(sub.id)}
                 disabled={sub.pipelineStatus !== "deposit_paid"}
-                className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-40"
+                className="rounded-xl bg-emerald-600 px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
+                title="Creates letter holds ±12h; emails .ics if Resend is configured"
               >
                 Confirm booking + calendar
               </button>
             </div>
-          </article>
-        ))}
+          );
+
+          return (
+            <article
+              key={sub.id}
+              className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-3 shadow-sm sm:p-4"
+            >
+              <div className="flex gap-2 sm:gap-3">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+                    <h3 className="text-base font-semibold leading-tight text-[var(--cocoa)]">
+                      {sub.contactName}
+                    </h3>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase leading-none sm:text-xs ${
+                        sub.pipelineStatus === "booked"
+                          ? "bg-emerald-100 text-emerald-900"
+                          : "bg-[var(--blush)] text-[var(--cocoa)]"
+                      }`}
+                    >
+                      {sub.pipelineStatus.replace(/_/g, " ")}
+                    </span>
+                  </div>
+                  <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
+                    <span className="break-all">{sub.contactEmail}</span>
+                    {sub.contactPhone?.trim() ? (
+                      <span className="text-[var(--cocoa)]"> · {sub.contactPhone}</span>
+                    ) : null}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-snug text-[var(--cocoa)] sm:text-xs">
+                    <span className="font-medium capitalize text-[var(--cocoa-muted)]">
+                      {eventTypeLabel(sub.eventType)}
+                    </span>
+                    <span className="text-[var(--blush)]" aria-hidden>
+                      ·
+                    </span>
+                    <span className="inline-flex items-center gap-0.5">
+                      <IconCalendar className="size-3.5 shrink-0 text-[var(--coral)]" />
+                      {formatEventDateLong(sub.eventDate)}
+                    </span>
+                    <span className="text-[var(--blush)]" aria-hidden>
+                      ·
+                    </span>
+                    <span className="inline-flex items-center gap-0.5">
+                      <IconClock className="size-3.5 shrink-0 text-[var(--coral)]" />
+                      {formatTime12h(sub.eventTimeLocal)}
+                    </span>
+                  </div>
+                  <p className="flex items-start gap-1 text-[11px] leading-snug text-[var(--cocoa-muted)] sm:text-xs">
+                    <IconMapPin className="mt-0.5 size-3.5 shrink-0 text-[var(--coral)]" />
+                    <span className="min-w-0">{compactLocationLine(sub)}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-2.5 border-t border-[var(--blush)]/70 pt-2.5">
+                <div className="flex flex-wrap items-end gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--cocoa-muted)]">
+                    Letters
+                  </span>
+                  <div
+                    className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-xl border-2 border-[var(--coral)] bg-gradient-to-br from-[#fff8f6] to-[var(--cream)] px-2 py-1.5 shadow-inner shadow-[#e8d5cf]/50"
+                    aria-label={`Lettering: ${sub.letteringRaw || "none"}`}
+                  >
+                    <LetteringPerLetter text={sub.letteringRaw} compact />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-xl border-2 border-[var(--coral)]/35 bg-gradient-to-br from-[#fffaf8] to-[var(--cream)]/90 p-3 sm:p-3.5">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--coral)]">
+                  Next step
+                </p>
+                <div className="mt-2 space-y-2.5">
+                  {sub.pipelineStatus === "pending_request" && (
+                    <>
+                      {quoteInputs}
+                      <button
+                        type="button"
+                        onClick={() => void requestDeposit(sub.id)}
+                        className="w-full rounded-lg bg-[#008cff] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 sm:w-auto sm:min-w-[12rem]"
+                        title="Saves fields, then opens Venmo charge link"
+                      >
+                        Send ${DEPOSIT_USD} deposit (opens Venmo)
+                      </button>
+                    </>
+                  )}
+                  {sub.pipelineStatus === "deposit_requested" && (
+                    <>
+                      <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
+                        Waiting for ${DEPOSIT_USD} in Venmo.
+                        {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "").trim() ? (
+                          <span className="mt-0.5 block font-mono text-sm text-[var(--cocoa)]">
+                            @
+                            {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "")
+                              .trim()
+                              .replace(/^@/, "")}
+                          </span>
+                        ) : null}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void markDepositPaid(sub.id)}
+                        className="w-full rounded-lg bg-amber-600 px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm sm:w-auto sm:min-w-[12rem]"
+                      >
+                        Mark ${DEPOSIT_USD} deposit paid
+                      </button>
+                    </>
+                  )}
+                  {sub.pipelineStatus === "deposit_paid" && (
+                    <button
+                      type="button"
+                      onClick={() => void confirmBooking(sub.id)}
+                      className="w-full rounded-lg bg-emerald-600 px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm sm:w-auto sm:min-w-[14rem]"
+                      title="Creates letter holds ±12h; emails .ics if Resend is configured"
+                    >
+                      Confirm booking + calendar invites
+                    </button>
+                  )}
+                  {sub.pipelineStatus === "booked" && (
+                    <>
+                      <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
+                        Booked — remainder via Venmo anytime.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => openVenmoRemainder(sub)}
+                        disabled={remainderCents == null || remainderCents <= 0}
+                        className="w-full rounded-lg border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] transition hover:bg-[#fff8f6] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+                      >
+                        {remainderCents != null && remainderCents > 0
+                          ? `Open Venmo for remainder ($${formatMoneyCents(remainderCents)})`
+                          : `No remainder (total ≤ $${DEPOSIT_USD})`}
+                      </button>
+                    </>
+                  )}
+                  {sub.pipelineStatus === "cancelled" && (
+                    <p className="text-xs text-[var(--cocoa-muted)]">
+                      Cancelled — no further actions.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <details className="group mt-3 overflow-hidden rounded-xl border border-[var(--blush)] bg-[var(--cream)]/25">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-xs font-semibold text-[var(--cocoa)] sm:text-sm [&::-webkit-details-marker]:hidden">
+                  <span>Event details, pricing &amp; all actions</span>
+                  <ChevronDetails className="shrink-0 text-[var(--cocoa-muted)] transition-transform duration-200 group-open:rotate-180" />
+                </summary>
+                <div className="space-y-4 border-t border-[var(--blush)] px-4 pb-4 pt-4">
+                  <p className="font-mono text-xs text-[var(--cocoa-muted)]">{sub.id}</p>
+                  <p className="text-sm capitalize text-[var(--cocoa-muted)]">
+                    {eventTypeLabel(sub.eventType)}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa)]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <IconCalendar className="shrink-0 text-[var(--coral)]" />
+                      {formatEventDateLong(sub.eventDate)}
+                    </span>
+                    <span className="text-[var(--cocoa-muted)]">·</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <IconClock className="shrink-0 text-[var(--coral)]" />
+                      {formatTime12h(sub.eventTimeLocal)}
+                    </span>
+                  </div>
+                  <p className="flex items-start gap-2 text-sm text-[var(--cocoa-muted)]">
+                    <IconMapPin className="mt-0.5 shrink-0 text-[var(--coral)]" />
+                    <span>
+                      {sub.eventAddressLine1}, {sub.eventCity}, {sub.eventState}{" "}
+                      {sub.eventPostalCode}
+                      <span className="text-[var(--cocoa)]">
+                        {sub.setupOutdoor ? " · Outdoor setup" : " · Indoor setup"}
+                      </span>
+                    </span>
+                  </p>
+
+                  <ol className="grid gap-2 text-xs text-[var(--cocoa-muted)] sm:grid-cols-4">
+                    <li
+                      className={`rounded-lg border px-2 py-2 ${
+                        sub.pipelineStatus === "pending_request"
+                          ? "border-[var(--coral)] bg-[#fff5f3]"
+                          : "border-transparent bg-[var(--cream)]"
+                      }`}
+                    >
+                      <span className="font-bold text-[var(--cocoa)]">1.</span> Quote + Venmo
+                    </li>
+                    <li
+                      className={`rounded-lg border px-2 py-2 ${
+                        sub.pipelineStatus === "deposit_requested"
+                          ? "border-[var(--coral)] bg-[#fff5f3]"
+                          : "border-transparent bg-[var(--cream)]"
+                      }`}
+                    >
+                      <span className="font-bold text-[var(--cocoa)]">2.</span> ${DEPOSIT_USD}{" "}
+                      link sent
+                    </li>
+                    <li
+                      className={`rounded-lg border px-2 py-2 ${
+                        sub.pipelineStatus === "deposit_paid"
+                          ? "border-[var(--coral)] bg-[#fff5f3]"
+                          : "border-transparent bg-[var(--cream)]"
+                      }`}
+                    >
+                      <span className="font-bold text-[var(--cocoa)]">3.</span> Deposit received
+                    </li>
+                    <li
+                      className={`rounded-lg border px-2 py-2 ${
+                        sub.pipelineStatus === "booked"
+                          ? "border-emerald-400 bg-emerald-50"
+                          : "border-transparent bg-[var(--cream)]"
+                      }`}
+                    >
+                      <span className="font-bold text-[var(--cocoa)]">4.</span> Booked + holds
+                    </li>
+                  </ol>
+
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                      Quote &amp; deposit math
+                    </p>
+                    <div className="mt-2">{pricingStack}</div>
+                  </div>
+
+                  {sub.pipelineStatus !== "pending_request" ? (
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                        Edit proposed total &amp; Venmo
+                      </p>
+                      <div className="mt-2">{quoteInputs}</div>
+                    </div>
+                  ) : null}
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => openVenmoRemainder(sub)}
+                      disabled={
+                        sub.pipelineStatus === "cancelled" ||
+                        remainderCents == null ||
+                        remainderCents <= 0
+                      }
+                      className="w-full rounded-xl border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] shadow-sm transition hover:bg-[#fff8f6] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+                      title="Opens Venmo for the balance after the deposit"
+                    >
+                      {remainderCents != null && remainderCents > 0
+                        ? `Open Venmo for remainder ($${formatMoneyCents(remainderCents)})`
+                        : `Open Venmo for remainder (proposed total must exceed $${DEPOSIT_USD})`}
+                    </button>
+                  </div>
+
+                  {actionGrid}
+
+                  {sub.pipelineStatus === "booked" && (
+                    <p className="text-xs text-emerald-800">
+                      Official booking: letters in this phrase are reserved for the event window
+                      (±12h). Open the Availability check above to verify future requests.
+                    </p>
+                  )}
+                </div>
+              </details>
+            </article>
+          );
+        })}
         {submissions.length === 0 && (
           <p className="text-[var(--cocoa-muted)]">No submissions yet.</p>
         )}

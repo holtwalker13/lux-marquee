@@ -7,10 +7,23 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const submissions = await prisma.contactSubmission.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 400,
-  });
+  try {
+    const submissions = await prisma.contactSubmission.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 400,
+    });
 
-  return NextResponse.json({ submissions });
+    return NextResponse.json({ submissions });
+  } catch (e) {
+    console.error("[admin/submissions GET]", e);
+    const body: {
+      error: string;
+      submissions: never[];
+      details?: string;
+    } = { error: "Failed to load submissions", submissions: [] };
+    if (process.env.NODE_ENV !== "production") {
+      body.details = e instanceof Error ? e.message : String(e);
+    }
+    return NextResponse.json(body, { status: 500 });
+  }
 }

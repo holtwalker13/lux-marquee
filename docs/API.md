@@ -1,6 +1,6 @@
 # API reference
 
-See [README.md](../README.md) for env vars and Sheets setup.
+See [README.md](../README.md) for env vars. **Google Sheets:** tab names, **SubmitRequests** header row (A–R), and column meanings → [GOOGLE_SHEETS.md](./GOOGLE_SHEETS.md).
 
 ## Public
 

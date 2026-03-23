@@ -8,7 +8,7 @@ Client quote form, Prisma database, optional **Google Sheets** logging for non-f
 cp .env.example .env
 npm install
 npx prisma db push
-npx prisma db seed
+npx prisma db seed   # includes fictional sample quotes — see prisma/mock-submissions.ts
 npm run dev
 ```
 
@@ -17,10 +17,12 @@ npm run dev
 
 ## Google Sheets
 
+Full reference: **[docs/GOOGLE_SHEETS.md](docs/GOOGLE_SHEETS.md)** — **SubmitRequests** row 1 header labels (A–R), column meanings, and how **proposed total** relates to the admin queue.
+
 1. Create a spreadsheet. Add a service account from Google Cloud (Sheets API enabled) and share the doc with the service account email as **Editor**.
 2. Set `GOOGLE_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY` in `.env` (use `\n` for newlines in the key when pasting into Netlify).
-3. **Tab `SubmitRequests`** (or override with `GOOGLE_SHEET_PENDING_TAB`): optional **row 1** headers (append still works without them). Each new public submission appends one row with: created ISO, DB id, pipeline status, name, email, phone, event type, event date, local time, event start UTC, full address line, lettering, est. total, indoor/outdoor, outside-radius flag, miles, proposed total, Venmo handle.
-4. **Tab `Inventory`** (or `GOOGLE_SHEET_INVENTORY_TAB`): column **A** = letter (`A`–`Z`), column **B** = `total_quantity`, from **row 2** down. In **Admin → Sync inventory from Google Sheet**, values are upserted into the database for availability math.
+3. **Tab `SubmitRequests`** (`GOOGLE_SHEET_PENDING_TAB`): public form submits append one row. **Row 1 headers** are applied automatically on first append, or run `npm run sheets:headers`. Exact labels and column mapping are in [docs/GOOGLE_SHEETS.md](docs/GOOGLE_SHEETS.md).
+4. **Tab `Inventory`** (`GOOGLE_SHEET_INVENTORY_TAB`): **A** = letter, **B** = qty, from row 2 down. **Admin → Sync inventory** upserts into the DB.
 
 If Sheets env vars are missing, the app still runs; rows are not appended.
 
@@ -54,6 +56,7 @@ If Sheets env vars are missing, the app still runs; rows are not appended.
 - [docs/PRD.md](docs/PRD.md)
 - [docs/API.md](docs/API.md)
 - [docs/UI.md](docs/UI.md)
+- [docs/GOOGLE_SHEETS.md](docs/GOOGLE_SHEETS.md)
 
 ## Stack
 

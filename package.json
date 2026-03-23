@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "prisma generate && prisma db push && next dev",
+    "db:sync": "prisma generate && prisma db push",
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "prisma db seed",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "test:sheets": "tsx scripts/test-google-sheets.ts",
+    "sheets:headers": "tsx scripts/ensure-submit-requests-headers.ts",
+    "sheets:push-submissions": "tsx scripts/push-db-submissions-to-sheet.ts",
+    "seed:inventory-sheet": "tsx scripts/seed-inventory-to-sheet.ts"
   },
   "prisma": {
     "seed": "npx tsx prisma/seed.ts"
@@ -33,6 +38,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.3.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "prisma": "6.19.2",

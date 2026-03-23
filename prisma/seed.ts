@@ -1,4 +1,7 @@
 import { PrismaClient } from "@prisma/client";
+import { getDefaultPriceGlyphRows } from "../src/lib/default-price-glyphs";
+import { computePriceTableVersion } from "../src/lib/pricing-version";
+import { mockContactSubmissionsForSeed } from "./mock-submissions";
 
 const prisma = new PrismaClient();
 
@@ -31,33 +34,23 @@ const LETTER_STOCK: [string, number][] = [
   ["Z", 1],
 ];
 
-function centsForLetter(letter: string): number {
-  const base = 5000;
-  const spread = (letter.charCodeAt(0) % 11) * 100;
-  return base + spread;
-}
-
 async function main() {
   await prisma.letterReservation.deleteMany();
   await prisma.contactSubmission.deleteMany();
   await prisma.letterInventory.deleteMany();
   await prisma.priceGlyph.deleteMany();
 
-  const glyphs: { glyph: string; priceCents: number }[] = [];
+  await prisma.priceGlyph.createMany({ data: getDefaultPriceGlyphRows() });
 
-  for (let i = 0; i < 26; i++) {
-    const letter = String.fromCharCode(65 + i);
-    glyphs.push({ glyph: letter, priceCents: centsForLetter(letter) });
-  }
-  for (let d = 0; d <= 9; d++) {
-    const glyph = String(d);
-    glyphs.push({ glyph, priceCents: 5200 + (d % 5) * 100 });
-  }
-  for (const glyph of ["&", "-", "'"]) {
-    glyphs.push({ glyph, priceCents: 5500 });
-  }
+  const glyphRows = await prisma.priceGlyph.findMany({
+    where: { active: true },
+    select: { glyph: true, priceCents: true },
+  });
+  const priceTableVersion = computePriceTableVersion(glyphRows);
 
-  await prisma.priceGlyph.createMany({ data: glyphs });
+  await prisma.contactSubmission.createMany({
+    data: mockContactSubmissionsForSeed(priceTableVersion),
+  });
 
   await prisma.letterInventory.createMany({
     data: LETTER_STOCK.map(([letter, totalQuantity]) => ({

@@ -240,6 +240,7 @@ export function QuoteQuestionnaire() {
       const res = await fetch("/api/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify({
           contactName,
           contactEmail,
@@ -259,13 +260,32 @@ export function QuoteQuestionnaire() {
           website: honeypot,
         }),
       });
-      const data = (await res.json()) as {
+      const raw = await res.text();
+      let data: {
         error?: string;
+        details?: string;
         estimatedTotalFormatted?: string;
         id?: string;
-      };
+      } = {};
+      if (raw.trim()) {
+        try {
+          data = JSON.parse(raw) as typeof data;
+        } catch {
+          setFormError(
+            "The server returned an unexpected response. Check the terminal running the app.",
+          );
+          return;
+        }
+      }
       if (!res.ok) {
-        setFormError(data.error ?? "Something went wrong.");
+        const base = data.error ?? "Something went wrong.";
+        const extra =
+          process.env.NODE_ENV === "development" &&
+          typeof data.details === "string" &&
+          data.details.trim()
+            ? `\n\n${data.details.trim()}`
+            : "";
+        setFormError(base + extra);
         return;
       }
       if (data.id) {
@@ -676,7 +696,7 @@ export function QuoteQuestionnaire() {
         </div>
 
         {formError && (
-          <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-800">
+          <p className="mt-4 whitespace-pre-wrap rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-800">
             {formError}
           </p>
         )}
