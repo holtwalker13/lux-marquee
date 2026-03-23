@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model PriceGlyph {
+  glyph      String   @id
+  priceCents Int
+  active     Boolean  @default(true)
+  updatedAt  DateTime @updatedAt
+}
+
+/// Client quote / booking pipeline (not finalized until booked).
+model ContactSubmission {
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now())
+  contactName           String
+  contactEmail          String
+  contactPhone          String?
+  eventType             String
+  eventDate             DateTime
+  /// Local wall time HH:mm in EVENT_TIMEZONE (e.g. 18:30).
+  eventTimeLocal        String    @default("12:00")
+  /// Canonical instant for reservations (UTC).
+  eventStartAt          DateTime?
+  eventAddressLine1     String    @default("")
+  eventAddressLine2     String?
+  eventCity             String    @default("")
+  eventState            String    @default("")
+  eventPostalCode       String    @default("")
+  eventLat              Float?
+  eventLng              Float?
+  distanceMilesFromBase Float?
+  outsideServiceRadius  Boolean   @default(false)
+  setupOutdoor          Boolean   @default(false)
+  letteringRaw          String
+  letteringNormalized   String
+  estimatedTotalCents   Int
+  priceTableVersion     String
+  consentAccepted       Boolean
+  /// pending_request | deposit_requested | deposit_paid | booked | cancelled
+  pipelineStatus        String    @default("pending_request")
+  proposedAmountCents   Int?
+  venmoHandle           String?
+  depositRequestedAt    DateTime?
+  depositPaidAt         DateTime?
+  bookingConfirmedAt    DateTime?
+  metadata              String?
+}
+
+/// Physical letter stock (A–Z). Can be synced from Google Sheet tab "Inventory".
+model LetterInventory {
+  letter         String @id
+  totalQuantity  Int
+  updatedAt      DateTime @updatedAt
+}
+
+/// Time-blocked hold per letter for a booking (±12h around event instant).
+model LetterReservation {
+  id               String   @id @default(cuid())
+  submissionId     String
+  letter           String
+  quantityReserved Int      @default(1)
+  windowStart      DateTime
+  windowEnd        DateTime
+  status           String   @default("active")
+  createdAt        DateTime @default(now())
+}

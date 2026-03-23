@@ -1,0 +1,246 @@
+import { NextResponse } from "next/server";
+import { queueAppendSubmissionToSheet } from "@/lib/append-submission-sheet";
+import { prisma } from "@/lib/db";
+import { parseEventStartUtc } from "@/lib/event-datetime";
+import {
+  formatAddressForGeocode,
+  geocodeAddressQuery,
+} from "@/lib/geocode-nominatim";
+import {
+  estimateFromPriceMap,
+  formatUsd,
+  normalizeLettering,
+} from "@/lib/pricing";
+import { computePriceTableVersion } from "@/lib/pricing-version";
+import {
+  SERVICE_BASE,
+  SERVICE_RADIUS_MILES,
+  haversineMiles,
+  isOutsideServiceRadius,
+} from "@/lib/service-area";
+import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
+
+const EVENT_TYPES = new Set(["wedding", "baby_shower", "birthday", "other"]);
+
+type Body = {
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  eventType?: string;
+  eventDate?: string;
+  eventTime?: string;
+  lettering?: string;
+  notes?: string;
+  eventAddressLine1?: string;
+  eventAddressLine2?: string;
+  eventCity?: string;
+  eventState?: string;
+  eventPostalCode?: string;
+  setupOutdoor?: boolean;
+  consentAccepted?: boolean;
+  website?: string;
+};
+
+function isValidEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+function buildMetadata(
+  notesRaw: string,
+  extra: Record<string, unknown>,
+): string | null {
+  const o: Record<string, unknown> = { ...extra };
+  if (notesRaw.length > 0) o.notes = notesRaw.slice(0, 2000);
+  return Object.keys(o).length === 0 ? null : JSON.stringify(o);
+}
+
+export async function POST(req: Request) {
+  let body: Body;
+  try {
+    body = (await req.json()) as Body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  if (body.website && String(body.website).trim() !== "") {
+    return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+  }
+
+  const contactName = String(body.contactName ?? "").trim();
+  const contactEmail = String(body.contactEmail ?? "").trim().toLowerCase();
+  const contactPhone = body.contactPhone
+    ? String(body.contactPhone).trim()
+    : "";
+  const eventType = String(body.eventType ?? "").trim();
+  const eventDateStr = String(body.eventDate ?? "").trim();
+  const eventTimeRaw = String(body.eventTime ?? "12:00").trim();
+  const letteringRaw = String(body.lettering ?? "");
+  const notesRaw = body.notes != null ? String(body.notes).trim() : "";
+  const consentAccepted = Boolean(body.consentAccepted);
+  const setupOutdoor = Boolean(body.setupOutdoor);
+
+  const eventAddressLine1 = String(body.eventAddressLine1 ?? "").trim();
+  const eventAddressLine2Raw = body.eventAddressLine2 != null
+    ? String(body.eventAddressLine2).trim()
+    : "";
+  const eventCity = String(body.eventCity ?? "").trim();
+  const eventState = String(body.eventState ?? "")
+    .trim()
+    .toUpperCase()
+    .slice(0, 2);
+  const eventPostalCode = String(body.eventPostalCode ?? "").trim();
+
+  if (!contactName) {
+    return NextResponse.json({ error: "Name is required." }, { status: 400 });
+  }
+  if (!contactEmail || !isValidEmail(contactEmail)) {
+    return NextResponse.json(
+      { error: "A valid email is required." },
+      { status: 400 },
+    );
+  }
+  if (!EVENT_TYPES.has(eventType)) {
+    return NextResponse.json({ error: "Pick a valid event type." }, { status: 400 });
+  }
+  if (!eventDateStr) {
+    return NextResponse.json({ error: "Event date is required." }, { status: 400 });
+  }
+
+  const eventTimeLocal = /^\d{2}:\d{2}$/.test(eventTimeRaw)
+    ? eventTimeRaw
+    : "12:00";
+
+  const parsedStart = parseEventStartUtc(eventDateStr, eventTimeLocal);
+  if (!parsedStart.ok) {
+    return NextResponse.json({ error: parsedStart.message }, { status: 400 });
+  }
+  const eventStartAt = parsedStart.utc;
+
+  const eventDate = new Date(`${eventDateStr}T12:00:00.000Z`);
+  if (Number.isNaN(eventDate.getTime())) {
+    return NextResponse.json({ error: "Invalid event date." }, { status: 400 });
+  }
+  if (!consentAccepted) {
+    return NextResponse.json(
+      { error: "Please agree to be contacted about your quote." },
+      { status: 400 },
+    );
+  }
+
+  if (!eventAddressLine1) {
+    return NextResponse.json(
+      { error: "Street address is required." },
+      { status: 400 },
+    );
+  }
+  if (!eventCity || !eventState || eventState.length !== 2) {
+    return NextResponse.json(
+      { error: "City and a 2-letter state are required." },
+      { status: 400 },
+    );
+  }
+  if (!eventPostalCode) {
+    return NextResponse.json(
+      { error: "ZIP or postal code is required." },
+      { status: 400 },
+    );
+  }
+
+  const geoQuery = formatAddressForGeocode({
+    line1: eventAddressLine1,
+    line2: eventAddressLine2Raw || undefined,
+    city: eventCity,
+    state: eventState,
+    postalCode: eventPostalCode,
+  });
+
+  const hit = await geocodeAddressQuery(geoQuery);
+  if (!hit) {
+    return NextResponse.json(
+      {
+        error:
+          "We couldn’t verify the event address. Please check the street, city, state, and ZIP.",
+      },
+      { status: 422 },
+    );
+  }
+
+  const distanceMiles = haversineMiles(
+    { lat: hit.lat, lon: hit.lon },
+    SERVICE_BASE,
+  );
+  const distanceRounded = Math.round(distanceMiles * 10) / 10;
+  const outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
+
+  const rows = await prisma.priceGlyph.findMany({
+    where: { active: true },
+    select: { glyph: true, priceCents: true },
+  });
+  const version = computePriceTableVersion(rows);
+  const priceMap = new Map(rows.map((r) => [r.glyph, r.priceCents]));
+
+  const normalized = normalizeLettering(letteringRaw);
+  const est = estimateFromPriceMap(normalized, priceMap);
+  if (!est.ok) {
+    return NextResponse.json({ error: est.error.message }, { status: 400 });
+  }
+
+  const metadata = buildMetadata(notesRaw, {
+    geocodedLabel: hit.displayName,
+    serviceBaseLabel: SERVICE_BASE.label,
+    serviceRadiusMiles: SERVICE_RADIUS_MILES,
+    travelSurchargeApplies: outsideServiceRadius,
+    outdoorSetupPremium: setupOutdoor,
+    googleSheetsPendingTabQueued: isGoogleSheetsConfigured(),
+  });
+
+  try {
+    const created = await prisma.contactSubmission.create({
+      data: {
+        contactName,
+        contactEmail,
+        contactPhone: contactPhone || null,
+        eventType,
+        eventDate,
+        eventTimeLocal,
+        eventStartAt,
+        eventAddressLine1,
+        eventAddressLine2: eventAddressLine2Raw || null,
+        eventCity,
+        eventState,
+        eventPostalCode,
+        eventLat: hit.lat,
+        eventLng: hit.lon,
+        distanceMilesFromBase: distanceRounded,
+        outsideServiceRadius,
+        setupOutdoor,
+        letteringRaw: letteringRaw.trim(),
+        letteringNormalized: est.normalized,
+        estimatedTotalCents: est.totalCents,
+        priceTableVersion: version,
+        consentAccepted: true,
+        pipelineStatus: "pending_request",
+        metadata,
+      },
+    });
+
+    queueAppendSubmissionToSheet(created);
+
+    return NextResponse.json(
+      {
+        id: created.id,
+        estimatedTotalCents: est.totalCents,
+        estimatedTotalFormatted: formatUsd(est.totalCents),
+        distanceMilesFromBase: distanceRounded,
+        outsideServiceRadius,
+        setupOutdoor,
+      },
+      { status: 201 },
+    );
+  } catch {
+    return NextResponse.json(
+      { error: "Could not save your request. Try again later." },
+      { status: 500 },
+    );
+  }
+}
