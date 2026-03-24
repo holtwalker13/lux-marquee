@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { queueAppendSubmissionToSheet } from "@/lib/append-submission-sheet";
-import { prisma } from "@/lib/db";
+import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 import { parseEventStartUtc } from "@/lib/event-datetime";
 import {
   formatAddressForGeocode,
@@ -18,8 +17,12 @@ import {
   haversineMiles,
   isOutsideServiceRadius,
 } from "@/lib/service-area";
-import { ensurePriceGlyphsSeeded } from "@/lib/ensure-price-glyphs";
-import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
+import { ensurePriceGlyphsFromSheet, loadActivePriceMap } from "@/lib/ensure-price-glyphs";
+import {
+  appendSubmission,
+  createNewSubmissionId,
+} from "@/lib/submissions-sheets-store";
+import type { SheetSubmission } from "@/lib/submission-sheet-schema";
 
 const EVENT_TYPES = new Set(["wedding", "baby_shower", "birthday", "other"]);
 
@@ -56,6 +59,13 @@ function buildMetadata(
 }
 
 export async function POST(req: Request) {
+  if (!isGoogleSheetsConfigured()) {
+    return NextResponse.json(
+      { error: "Server is not configured to save requests. Try again later." },
+      { status: 503 },
+    );
+  }
+
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -188,14 +198,13 @@ export async function POST(req: Request) {
   const outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
 
   try {
-    await ensurePriceGlyphsSeeded(prisma);
-
-    const rows = await prisma.priceGlyph.findMany({
-      where: { active: true },
-      select: { glyph: true, priceCents: true },
-    });
-    const version = computePriceTableVersion(rows);
-    const priceMap = new Map(rows.map((r) => [r.glyph, r.priceCents]));
+    await ensurePriceGlyphsFromSheet();
+    const priceMap = await loadActivePriceMap();
+    const rowsForVersion = [...priceMap.entries()].map(([glyph, priceCents]) => ({
+      glyph,
+      priceCents,
+    }));
+    const version = computePriceTableVersion(rowsForVersion);
 
     const normalized = normalizeLettering(letteringRaw);
     const est = estimateFromPriceMap(normalized, priceMap);
@@ -209,43 +218,50 @@ export async function POST(req: Request) {
       serviceRadiusMiles: SERVICE_RADIUS_MILES,
       travelSurchargeApplies: outsideServiceRadius,
       outdoorSetupPremium: setupOutdoor,
-      googleSheetsPendingTabQueued: isGoogleSheetsConfigured(),
     });
 
-    const created = await prisma.contactSubmission.create({
-      data: {
-        contactName,
-        contactEmail,
-        contactPhone: contactPhone || null,
-        eventType,
-        eventDate,
-        eventTimeLocal,
-        eventStartAt,
-        eventAddressLine1,
-        eventAddressLine2: eventAddressLine2Raw || null,
-        eventCity,
-        eventState,
-        eventPostalCode,
-        eventLat: hit.lat,
-        eventLng: hit.lon,
-        distanceMilesFromBase: distanceRounded,
-        outsideServiceRadius,
-        setupOutdoor,
-        letteringRaw: letteringRaw.trim(),
-        letteringNormalized: est.normalized,
-        estimatedTotalCents: est.totalCents,
-        priceTableVersion: version,
-        consentAccepted: true,
-        pipelineStatus: "pending_request",
-        metadata,
-      },
-    });
+    const id = createNewSubmissionId();
+    const createdAt = new Date();
 
-    queueAppendSubmissionToSheet(created);
+    const sub: SheetSubmission = {
+      id,
+      createdAt,
+      contactName,
+      contactEmail,
+      contactPhone: contactPhone || null,
+      eventType,
+      eventDate,
+      eventTimeLocal,
+      eventStartAt,
+      eventAddressLine1,
+      eventAddressLine2: eventAddressLine2Raw || null,
+      eventCity,
+      eventState,
+      eventPostalCode,
+      eventLat: hit.lat,
+      eventLng: hit.lon,
+      distanceMilesFromBase: distanceRounded,
+      outsideServiceRadius,
+      setupOutdoor,
+      letteringRaw: letteringRaw.trim(),
+      letteringNormalized: est.normalized,
+      estimatedTotalCents: est.totalCents,
+      priceTableVersion: version,
+      consentAccepted: true,
+      pipelineStatus: "pending_request",
+      proposedAmountCents: null,
+      venmoHandle: null,
+      depositRequestedAt: null,
+      depositPaidAt: null,
+      bookingConfirmedAt: null,
+      metadata,
+    };
+
+    await appendSubmission(sub);
 
     return NextResponse.json(
       {
-        id: created.id,
+        id: sub.id,
         estimatedTotalCents: est.totalCents,
         estimatedTotalFormatted: formatUsd(est.totalCents),
         distanceMilesFromBase: distanceRounded,
@@ -256,13 +272,13 @@ export async function POST(req: Request) {
     );
   } catch (e) {
     console.error("[submissions POST]", e);
-    const body: {
+    const resp: {
       error: string;
       details?: string;
     } = { error: "Could not save your request. Try again later." };
     if (process.env.NODE_ENV !== "production") {
-      body.details = e instanceof Error ? e.message : String(e);
+      resp.details = e instanceof Error ? e.message : String(e);
     }
-    return NextResponse.json(body, { status: 500 });
+    return NextResponse.json(resp, { status: 500 });
   }
 }

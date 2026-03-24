@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import type { PrismaClient } from "@prisma/client";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
 import { sendBookingInviteEmail } from "@/lib/calendar-invite";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
@@ -9,6 +7,11 @@ import {
   checkLetterAvailability,
   createReservationsForSubmission,
 } from "@/lib/reservations";
+import {
+  findSubmissionById,
+  sheetSubmissionToApiJson,
+  updateSubmission,
+} from "@/lib/submissions-sheets-store";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -18,7 +21,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
 
   const { id } = await ctx.params;
-  const sub = await prisma.contactSubmission.findUnique({ where: { id } });
+  const sub = await findSubmissionById(id);
   if (!sub) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
@@ -37,41 +40,46 @@ export async function POST(_req: Request, ctx: Ctx) {
     );
   }
 
-  const inventory = await loadLetterInventoryTotals(prisma);
-
+  let inventory: Map<string, number>;
   try {
-    await prisma.$transaction(async (tx) => {
-      const check = await checkLetterAvailability(
-        tx as unknown as PrismaClient,
-        sub.letteringNormalized,
-        sub.eventStartAt!,
-        inventory,
-      );
-      if (!check.ok) {
-        throw new AvailabilityConflictError(check.issues);
-      }
-      await createReservationsForSubmission(
-        tx as unknown as PrismaClient,
-        sub.id,
-        sub.letteringNormalized,
-        sub.eventStartAt!,
-      );
-      await tx.contactSubmission.update({
-        where: { id: sub.id },
-        data: {
-          pipelineStatus: "booked",
-          bookingConfirmedAt: new Date(),
-        },
-      });
-    });
+    inventory = await loadLetterInventoryTotals();
   } catch (e) {
-    if (e instanceof AvailabilityConflictError) {
-      return NextResponse.json(
-        { error: e.message, issues: e.issues },
-        { status: 409 },
-      );
-    }
-    throw e;
+    console.error("[confirm-booking] inventory", e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Could not load inventory." },
+      { status: 503 },
+    );
+  }
+
+  const check = await checkLetterAvailability(
+    sub.letteringNormalized,
+    sub.eventStartAt,
+    inventory,
+  );
+  if (!check.ok) {
+    return NextResponse.json(
+      {
+        error: new AvailabilityConflictError(check.issues).message,
+        issues: check.issues,
+      },
+      { status: 409 },
+    );
+  }
+
+  await createReservationsForSubmission(
+    sub.id,
+    sub.letteringNormalized,
+    sub.eventStartAt,
+  );
+  await updateSubmission(id, (p) => ({
+    ...p,
+    pipelineStatus: "booked",
+    bookingConfirmedAt: new Date(),
+  }));
+
+  const refreshed = await findSubmissionById(id);
+  if (!refreshed) {
+    return NextResponse.json({ error: "Not found after update." }, { status: 500 });
   }
 
   const addressSummary = [
@@ -88,10 +96,8 @@ export async function POST(_req: Request, ctx: Ctx) {
     addressSummary,
   });
 
-  const updated = await prisma.contactSubmission.findUnique({ where: { id } });
-
   return NextResponse.json({
-    submission: updated,
+    submission: sheetSubmissionToApiJson(refreshed),
     calendarEmailSent: emailResult.sent,
     calendarEmailNote: emailResult.reason,
     ics: emailResult.ics,

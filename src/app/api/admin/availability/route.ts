@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { parseEventStartUtc } from "@/lib/event-datetime";
 import { normalizeLettering } from "@/lib/pricing";
 import { checkLetterAvailability } from "@/lib/reservations";
@@ -29,9 +28,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: parsed.message }, { status: 400 });
   }
 
-  const inventory = await loadLetterInventoryTotals(prisma);
+  let inventory: Map<string, number>;
+  try {
+    inventory = await loadLetterInventoryTotals();
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Could not load inventory." },
+      { status: 503 },
+    );
+  }
+
   const result = await checkLetterAvailability(
-    prisma,
     normalized,
     parsed.utc,
     inventory,

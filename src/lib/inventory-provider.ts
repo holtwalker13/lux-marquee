@@ -1,25 +1,19 @@
-import type { PrismaClient } from "@prisma/client";
 import {
   fetchLetterInventoryFromSheet,
   isGoogleSheetsConfigured,
 } from "@/lib/google-sheets";
 
-export async function loadLetterInventoryTotals(
-  prisma: PrismaClient,
-): Promise<Map<string, number>> {
-  if (isGoogleSheetsConfigured()) {
-    try {
-      const fromSheet = await fetchLetterInventoryFromSheet();
-      if (fromSheet && fromSheet.size > 0) return fromSheet;
-    } catch (e) {
-      console.error("[inventory] Google Sheet read failed, using database.", e);
-    }
+export async function loadLetterInventoryTotals(): Promise<Map<string, number>> {
+  if (!isGoogleSheetsConfigured()) {
+    throw new Error(
+      "Google Sheets is not configured (GOOGLE_SHEET_ID, service account, private key).",
+    );
   }
-
-  const rows = await prisma.letterInventory.findMany({
-    select: { letter: true, totalQuantity: true },
-  });
-  const map = new Map<string, number>();
-  for (const r of rows) map.set(r.letter, r.totalQuantity);
-  return map;
+  const fromSheet = await fetchLetterInventoryFromSheet();
+  if (!fromSheet || fromSheet.size === 0) {
+    throw new Error(
+      "No letter inventory rows in the Inventory tab (columns A–B from row 2).",
+    );
+  }
+  return fromSheet;
 }

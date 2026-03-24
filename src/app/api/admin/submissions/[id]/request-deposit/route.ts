@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
 import { buildVenmoDepositUrl, depositAmountDollars } from "@/lib/venmo-deposit";
+import {
+  findSubmissionById,
+  sheetSubmissionToApiJson,
+  updateSubmission,
+} from "@/lib/submissions-sheets-store";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -11,7 +15,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
 
   const { id } = await ctx.params;
-  const sub = await prisma.contactSubmission.findUnique({ where: { id } });
+  const sub = await findSubmissionById(id);
   if (!sub) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
@@ -31,16 +35,18 @@ export async function POST(_req: Request, ctx: Ctx) {
   const note = `Marquee deposit (${sub.letteringRaw.slice(0, 80)})`;
   const venmoUrl = buildVenmoDepositUrl(handle, note);
 
-  const updated = await prisma.contactSubmission.update({
-    where: { id },
-    data: {
-      pipelineStatus: "deposit_requested",
-      depositRequestedAt: new Date(),
-    },
-  });
+  const updated = await updateSubmission(id, (p) => ({
+    ...p,
+    pipelineStatus: "deposit_requested",
+    depositRequestedAt: new Date(),
+  }));
+
+  if (!updated) {
+    return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
 
   return NextResponse.json({
-    submission: updated,
+    submission: sheetSubmissionToApiJson(updated),
     venmoUrl,
     depositAmountDollars: depositAmountDollars(),
   });

@@ -1,4 +1,4 @@
-/** Rows for `PriceGlyph` — shared by `prisma/seed.ts` and runtime auto-seed. */
+/** Default per-glyph prices when the Prices sheet tab is empty. */
 export type PriceGlyphRow = { glyph: string; priceCents: number };
 
 function centsForLetter(letter: string): number {

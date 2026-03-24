@@ -16,13 +16,13 @@ The business sells large light-up marquee letters. Clients need a **self-serve w
 **In scope (v1)**
 
 - Shareable web flow: schedule → lettering → live estimate → contact + submit.
-- Per-glyph prices from an authoritative store (database).
+- Per-glyph prices from **Google Sheets** (Prices tab).
 - Server-side recomputation of totals on submit.
 - Light, modern, playful UI with strong typography.
 
 **Out of scope (v1)**
 
-- Owner admin UI for editing prices (use seed/migrations or direct DB).
+- Owner admin UI for editing prices (edit the **Prices** tab in Google Sheets).
 - Payments, calendar conflict detection, automated email (can be added later).
 
 ## 4. User flow (wireframe-level)
@@ -143,15 +143,15 @@ The business sells large light-up marquee letters. Clients need a **self-serve w
 **Errors**
 
 - `400` — validation (email, date, lettering, consent, honeypot, unknown characters).
-- `500` — server/database failure.
+- `500` — server or Google Sheets failure.
 
 **Server behavior**
 
 1. Validate payload.
 2. Normalize lettering; validate allowed charset and length.
-3. Load active `PriceGlyph` rows; compute `version` string (deterministic).
-4. Compute `estimatedTotalCents` from DB prices only.
-5. Insert `ContactSubmission` with computed total and version.
+3. Load active price rows from the **Prices** sheet; compute `version` string (deterministic).
+4. Compute `estimatedTotalCents` from sheet prices only.
+5. Append a row to **SubmitRequests** with computed total and version.
 6. Return `201` with id and formatted total.
 
 ## 8. UX copy (key strings)

@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
 import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
@@ -10,14 +9,14 @@ export async function GET() {
   }
 
   try {
-    const totals = await loadLetterInventoryTotals(prisma);
+    const totals = await loadLetterInventoryTotals();
     const letters = [...totals.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([letter, totalQuantity]) => ({ letter, totalQuantity }));
 
     return NextResponse.json({
       letters,
-      source: isGoogleSheetsConfigured() ? "google_sheet_or_fallback" : "database",
+      source: "google_sheet",
     });
   } catch (e) {
     console.error("[admin/inventory GET]", e);
@@ -27,9 +26,9 @@ export async function GET() {
       source: string;
       details?: string;
     } = {
-      error: "Failed to load inventory",
+      error: e instanceof Error ? e.message : "Failed to load inventory",
       letters: [],
-      source: isGoogleSheetsConfigured() ? "google_sheet_or_fallback" : "database",
+      source: isGoogleSheetsConfigured() ? "google_sheet" : "unconfigured",
     };
     if (process.env.NODE_ENV !== "production") {
       body.details = e instanceof Error ? e.message : String(e);

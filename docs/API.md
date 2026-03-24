@@ -1,6 +1,6 @@
 # API reference
 
-See [README.md](../README.md) for env vars. **Google Sheets:** tab names, **SubmitRequests** header row (A–R), and column meanings → [GOOGLE_SHEETS.md](./GOOGLE_SHEETS.md).
+See [README.md](../README.md) for env vars. **Google Sheets:** all persistence; **SubmitRequests** columns A–AF → [GOOGLE_SHEETS.md](./GOOGLE_SHEETS.md).
 
 ## Public
 
@@ -17,6 +17,6 @@ See [README.md](../README.md) for env vars. **Google Sheets:** tab names, **Subm
 - `POST /api/admin/submissions/[id]/request-deposit` — sets `deposit_requested`, returns `venmoUrl`.
 - `POST /api/admin/submissions/[id]/mark-deposit-paid` — `deposit_paid`.
 - `POST /api/admin/submissions/[id]/confirm-booking` — `booked` + reservations; optional Resend emails + `ics` in JSON if email skipped.
-- `GET /api/admin/inventory` — letter totals (Sheet-backed when configured).
-- `POST /api/admin/inventory/sync` — upsert DB from Sheet `Inventory` tab.
+- `GET /api/admin/inventory` — letter totals from **Inventory** tab.
+- `POST /api/admin/inventory/sync` — verifies the **Inventory** tab is readable (data is always live from the sheet).
 - `GET /api/admin/availability?phrase=&date=&time=` — A–Z overlap check.

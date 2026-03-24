@@ -30,6 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# legacy local sqlite (unused; do not commit)
+/prisma/dev.db
+/prisma/dev.db-journal
+
 # env files (can opt-in for committing if needed)
 .env
 .env.local
@@ -37,10 +41,6 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 !.env.example
-
-# sqlite
-/prisma/dev.db
-/prisma/dev.db-journal
 
 # vercel
 .vercel

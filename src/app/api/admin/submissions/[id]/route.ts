@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
 import { parseMoneyToCents } from "@/lib/money-parse";
+import {
+  sheetSubmissionToApiJson,
+  updateSubmission,
+} from "@/lib/submissions-sheets-store";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -22,29 +25,22 @@ export async function PATCH(req: Request, ctx: Ctx) {
   const venmoHandle =
     body.venmoHandle != null ? String(body.venmoHandle).trim() : undefined;
 
-  const data: {
-    proposedAmountCents?: number | null;
-    venmoHandle?: string | null;
-  } = {};
+  const hasProposed = body.proposedAmountDollars !== undefined;
+  const hasVenmo = body.venmoHandle !== undefined;
 
-  if (body.proposedAmountDollars !== undefined) {
-    data.proposedAmountCents = proposedAmountCents;
-  }
-  if (body.venmoHandle !== undefined) {
-    data.venmoHandle = venmoHandle || null;
-  }
-
-  if (Object.keys(data).length === 0) {
+  if (!hasProposed && !hasVenmo) {
     return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
   }
 
-  try {
-    const updated = await prisma.contactSubmission.update({
-      where: { id },
-      data,
-    });
-    return NextResponse.json({ submission: updated });
-  } catch {
+  const updated = await updateSubmission(id, (prev) => ({
+    ...prev,
+    ...(hasProposed ? { proposedAmountCents } : {}),
+    ...(hasVenmo ? { venmoHandle: venmoHandle || null } : {}),
+  }));
+
+  if (!updated) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
+
+  return NextResponse.json({ submission: sheetSubmissionToApiJson(updated) });
 }

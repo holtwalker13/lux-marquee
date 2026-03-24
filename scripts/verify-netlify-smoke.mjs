@@ -1,6 +1,5 @@
 /**
- * Smoke checks after a production build — same steps Netlify runs first
- * (prisma generate + next build). Use: npm run test:netlify-smoke
+ * Smoke checks after a production build. Use: npm run test:netlify-smoke
  */
 import fs from "fs";
 import path from "path";
@@ -22,16 +21,12 @@ if (!toml.includes("@netlify/plugin-nextjs")) {
   console.error("FAIL: netlify.toml must include @netlify/plugin-nextjs");
   process.exit(1);
 }
-if (!toml.includes("prisma generate") || !toml.includes("npm run build")) {
-  console.error(
-    "FAIL: netlify.toml build command should run prisma generate and npm run build"
-  );
+if (!toml.includes("npm run build")) {
+  console.error("FAIL: netlify.toml build should run npm run build");
   process.exit(1);
 }
 
 mustExist(".next/BUILD_ID", "run npm run build first");
 mustExist(".next/required-server-files.json");
-mustExist("node_modules/@prisma/client");
-mustExist("node_modules/.prisma/client", "run prisma generate or npm install");
 
 console.log("OK: Netlify-oriented build smoke checks passed.");

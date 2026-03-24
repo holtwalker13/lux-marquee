@@ -1,18 +1,22 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 import { requireAdminSession } from "@/lib/admin-request";
+import { listSubmissionsApiJson } from "@/lib/submissions-sheets-store";
 
 export async function GET() {
   if (!(await requireAdminSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  try {
-    const submissions = await prisma.contactSubmission.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 400,
-    });
+  if (!isGoogleSheetsConfigured()) {
+    return NextResponse.json(
+      { error: "Google Sheets is not configured.", submissions: [] },
+      { status: 503 },
+    );
+  }
 
+  try {
+    const submissions = await listSubmissionsApiJson();
     return NextResponse.json({ submissions });
   } catch (e) {
     console.error("[admin/submissions GET]", e);

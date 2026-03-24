@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
+import {
+  findSubmissionById,
+  sheetSubmissionToApiJson,
+  updateSubmission,
+} from "@/lib/submissions-sheets-store";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -10,25 +14,27 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
 
   const { id } = await ctx.params;
-  const sub = await prisma.contactSubmission.findUnique({ where: { id } });
-  if (!sub) {
+  const existing = await findSubmissionById(id);
+  if (!existing) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
 
-  if (sub.pipelineStatus !== "deposit_requested") {
+  if (existing.pipelineStatus !== "deposit_requested") {
     return NextResponse.json(
       { error: "Mark deposit paid only after a deposit has been requested." },
       { status: 400 },
     );
   }
 
-  const updated = await prisma.contactSubmission.update({
-    where: { id },
-    data: {
-      pipelineStatus: "deposit_paid",
-      depositPaidAt: new Date(),
-    },
-  });
+  const updated = await updateSubmission(id, (p) => ({
+    ...p,
+    pipelineStatus: "deposit_paid",
+    depositPaidAt: new Date(),
+  }));
 
-  return NextResponse.json({ submission: updated });
+  if (!updated) {
+    return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
+
+  return NextResponse.json({ submission: sheetSubmissionToApiJson(updated) });
 }

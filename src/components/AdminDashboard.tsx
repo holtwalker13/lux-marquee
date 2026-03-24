@@ -346,12 +346,19 @@ export function AdminDashboard() {
     setSyncing(true);
     try {
       const res = await fetch("/api/admin/inventory/sync", { method: "POST" });
-      const data = (await res.json()) as { error?: string; count?: number };
+      const data = (await res.json()) as {
+        error?: string;
+        count?: number;
+        message?: string;
+      };
       if (!res.ok) {
-        alert(data.error ?? "Sync failed");
+        alert(data.error ?? "Check failed");
         return;
       }
-      alert(`Synced ${data.count ?? 0} letters from Google Sheet into the database.`);
+      alert(
+        data.message ??
+          `Inventory tab OK — ${data.count ?? 0} letter row(s) readable.`,
+      );
       await load();
     } finally {
       setSyncing(false);
@@ -562,7 +569,7 @@ export function AdminDashboard() {
         <h2 className="font-semibold text-[var(--cocoa)]">Letter stock</h2>
         <p className="mt-1 text-xs text-[var(--cocoa-muted)]">
           Source: {invSource}. Edit counts in Google Sheet tab “Inventory” (A=letter,
-          B=qty from row 2), then sync.
+          B=qty from row 2). Counts reload every time you open the dashboard.
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           {letters.map((l) => (
@@ -580,7 +587,7 @@ export function AdminDashboard() {
           onClick={() => void syncInventory()}
           className="mt-4 rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
         >
-          {syncing ? "Syncing…" : "Sync inventory from Google Sheet"}
+          {syncing ? "Checking…" : "Verify Inventory tab"}
         </button>
       </section>
 

@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { requireAdminSession } from "@/lib/admin-request";
 import { fetchLetterInventoryFromSheet, isGoogleSheetsConfigured } from "@/lib/google-sheets";
 
+/**
+ * Inventory is always read live from the Google Sheet. This endpoint only
+ * verifies the tab is readable (optional admin “ping”).
+ */
 export async function POST() {
   if (!(await requireAdminSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -23,13 +26,9 @@ export async function POST() {
     );
   }
 
-  for (const [letter, totalQuantity] of map.entries()) {
-    await prisma.letterInventory.upsert({
-      where: { letter },
-      create: { letter, totalQuantity },
-      update: { totalQuantity },
-    });
-  }
-
-  return NextResponse.json({ ok: true, count: map.size });
+  return NextResponse.json({
+    ok: true,
+    count: map.size,
+    message: "Inventory is read directly from the Inventory tab on each request.",
+  });
 }
