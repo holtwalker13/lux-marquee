@@ -49,12 +49,8 @@ function isValidEmail(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-function buildMetadata(
-  notesRaw: string,
-  extra: Record<string, unknown>,
-): string | null {
+function buildMetadata(extra: Record<string, unknown>): string | null {
   const o: Record<string, unknown> = { ...extra };
-  if (notesRaw.length > 0) o.notes = notesRaw.slice(0, 2000);
   return Object.keys(o).length === 0 ? null : JSON.stringify(o);
 }
 
@@ -87,6 +83,8 @@ export async function POST(req: Request) {
   const eventTimeRaw = String(body.eventTime ?? "12:00").trim();
   const letteringRaw = String(body.lettering ?? "");
   const notesRaw = body.notes != null ? String(body.notes).trim() : "";
+  const normalized = normalizeLettering(letteringRaw);
+  const pickupOnly = /^\d{1,4}$/.test(normalized);
   const consentAccepted = Boolean(body.consentAccepted);
   const setupOutdoor = Boolean(body.setupOutdoor);
 
@@ -138,64 +136,69 @@ export async function POST(req: Request) {
     );
   }
 
-  if (!eventAddressLine1) {
-    return NextResponse.json(
-      { error: "Street address is required." },
-      { status: 400 },
-    );
-  }
-  if (!eventCity || !eventState || eventState.length !== 2) {
-    return NextResponse.json(
-      { error: "City and a 2-letter state are required." },
-      { status: 400 },
-    );
-  }
-  if (!eventPostalCode) {
-    return NextResponse.json(
-      { error: "ZIP or postal code is required." },
-      { status: 400 },
-    );
-  }
+  let hit: Awaited<ReturnType<typeof geocodeAddressQuery>> | null = null;
+  let distanceRounded = 0;
+  let outsideServiceRadius = false;
 
-  const geoQuery = formatAddressForGeocode({
-    line1: eventAddressLine1,
-    line2: eventAddressLine2Raw || undefined,
-    city: eventCity,
-    state: eventState,
-    postalCode: eventPostalCode,
-  });
+  if (!pickupOnly) {
+    if (!eventAddressLine1) {
+      return NextResponse.json(
+        { error: "Street address is required." },
+        { status: 400 },
+      );
+    }
+    if (!eventCity || !eventState || eventState.length !== 2) {
+      return NextResponse.json(
+        { error: "City and a 2-letter state are required." },
+        { status: 400 },
+      );
+    }
+    if (!eventPostalCode) {
+      return NextResponse.json(
+        { error: "ZIP or postal code is required." },
+        { status: 400 },
+      );
+    }
 
-  let hit: Awaited<ReturnType<typeof geocodeAddressQuery>>;
-  try {
-    hit = await geocodeAddressQuery(geoQuery);
-  } catch (e) {
-    console.error("[submissions POST] geocode", e);
-    return NextResponse.json(
-      {
-        error: "Address lookup failed. Try again in a moment.",
-        ...(process.env.NODE_ENV !== "production" && {
-          details: e instanceof Error ? e.message : String(e),
-        }),
-      },
-      { status: 503 },
-    );
-  }
-  if (!hit) {
-    return NextResponse.json(
-      {
-        error:
-          "We couldn’t verify the event address. Please check the street, city, state, and ZIP.",
-      },
-      { status: 422 },
-    );
-  }
+    const geoQuery = formatAddressForGeocode({
+      line1: eventAddressLine1,
+      line2: eventAddressLine2Raw || undefined,
+      city: eventCity,
+      state: eventState,
+      postalCode: eventPostalCode,
+    });
 
-  const distanceMiles = haversineMiles(
-    { lat: hit.lat, lon: hit.lon },
-    SERVICE_BASE,
-  );
-  const distanceRounded = Math.round(distanceMiles * 10) / 10;
-  const outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
+    try {
+      hit = await geocodeAddressQuery(geoQuery);
+    } catch (e) {
+      console.error("[submissions POST] geocode", e);
+      return NextResponse.json(
+        {
+          error: "Address lookup failed. Try again in a moment.",
+          ...(process.env.NODE_ENV !== "production" && {
+            details: e instanceof Error ? e.message : String(e),
+          }),
+        },
+        { status: 503 },
+      );
+    }
+    if (!hit) {
+      return NextResponse.json(
+        {
+          error:
+            "We couldn’t verify the event address. Please check the street, city, state, and ZIP.",
+        },
+        { status: 422 },
+      );
+    }
+
+    const distanceMiles = haversineMiles(
+      { lat: hit.lat, lon: hit.lon },
+      SERVICE_BASE,
+    );
+    distanceRounded = Math.round(distanceMiles * 10) / 10;
+    outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
+  }
 
   try {
     await ensurePriceGlyphsFromSheet();
@@ -206,18 +209,18 @@ export async function POST(req: Request) {
     }));
     const version = computePriceTableVersion(rowsForVersion);
 
-    const normalized = normalizeLettering(letteringRaw);
     const est = estimateFromPriceMap(normalized, priceMap);
     if (!est.ok) {
       return NextResponse.json({ error: est.error.message }, { status: 400 });
     }
 
-    const metadata = buildMetadata(notesRaw, {
-      geocodedLabel: hit.displayName,
+    const metadata = buildMetadata({
+      geocodedLabel: hit?.displayName ?? null,
       serviceBaseLabel: SERVICE_BASE.label,
       serviceRadiusMiles: SERVICE_RADIUS_MILES,
       travelSurchargeApplies: outsideServiceRadius,
-      outdoorSetupPremium: setupOutdoor,
+      outdoorSetupPremium: pickupOnly ? false : setupOutdoor,
+      pickupOnly,
     });
 
     const id = createNewSubmissionId();
@@ -233,17 +236,18 @@ export async function POST(req: Request) {
       eventDate,
       eventTimeLocal,
       eventStartAt,
-      eventAddressLine1,
-      eventAddressLine2: eventAddressLine2Raw || null,
-      eventCity,
-      eventState,
-      eventPostalCode,
-      eventLat: hit.lat,
-      eventLng: hit.lon,
+      eventAddressLine1: pickupOnly ? "LOCAL PICKUP" : eventAddressLine1,
+      eventAddressLine2: pickupOnly ? null : eventAddressLine2Raw || null,
+      eventCity: pickupOnly ? "" : eventCity,
+      eventState: pickupOnly ? "" : eventState,
+      eventPostalCode: pickupOnly ? "" : eventPostalCode,
+      eventLat: hit?.lat ?? null,
+      eventLng: hit?.lon ?? null,
       distanceMilesFromBase: distanceRounded,
       outsideServiceRadius,
-      setupOutdoor,
+      setupOutdoor: pickupOnly ? false : setupOutdoor,
       letteringRaw: letteringRaw.trim(),
+      notes: notesRaw || null,
       letteringNormalized: est.normalized,
       estimatedTotalCents: est.totalCents,
       priceTableVersion: version,

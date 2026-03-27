@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireAdminSession } from "@/lib/admin-request";
-import { buildVenmoDepositUrl, depositAmountDollars } from "@/lib/venmo-deposit";
+import {
+  buildVenmoDepositUrl,
+  depositAmountDollars,
+} from "@/lib/venmo-deposit";
 import {
   findSubmissionById,
   sheetSubmissionToApiJson,
@@ -28,8 +31,15 @@ export async function POST(_req: Request, ctx: Ctx) {
     );
   }
 
-  if (sub.pipelineStatus === "booked" || sub.pipelineStatus === "cancelled") {
-    return NextResponse.json({ error: "Invalid state for deposit request." }, { status: 400 });
+  if (
+    sub.pipelineStatus === "booked" ||
+    sub.pipelineStatus === "cancelled" ||
+    sub.pipelineStatus === "deposit_paid"
+  ) {
+    return NextResponse.json(
+      { error: "Deposit request is only for new or awaiting-deposit jobs." },
+      { status: 400 },
+    );
   }
 
   const note = `Marquee deposit (${sub.letteringRaw.slice(0, 80)})`;

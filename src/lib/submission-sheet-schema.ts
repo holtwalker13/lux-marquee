@@ -15,6 +15,7 @@ export const SUBMIT_REQUEST_HEADERS = [
   "Event start (UTC)",
   "Event address",
   "Lettering",
+  "Notes",
   "Estimated total",
   "Setup",
   "Outside radius",
@@ -60,6 +61,7 @@ export type SheetSubmission = {
   outsideServiceRadius: boolean;
   setupOutdoor: boolean;
   letteringRaw: string;
+  notes: string | null;
   letteringNormalized: string;
   estimatedTotalCents: number;
   priceTableVersion: string;
@@ -97,6 +99,24 @@ function parseBool(s: string, fallback: boolean): boolean {
   return fallback;
 }
 
+function looksLikeSetupToken(s: string): boolean {
+  const t = s.trim().toLowerCase();
+  return t === "indoor" || t === "outdoor";
+}
+
+function extractLegacyNotesFromMetadata(metadata: string): string | null {
+  if (!metadata.trim()) return null;
+  try {
+    const parsed = JSON.parse(metadata) as { notes?: unknown };
+    if (typeof parsed.notes === "string" && parsed.notes.trim()) {
+      return parsed.notes.trim();
+    }
+  } catch {
+    // ignore invalid legacy metadata
+  }
+  return null;
+}
+
 /** Parse a data row (may be legacy 18-column). */
 export function parseSubmissionRow(row: string[]): SheetSubmission | null {
   const id = cell(row, 1);
@@ -109,23 +129,51 @@ export function parseSubmissionRow(row: string[]): SheetSubmission | null {
   const city = cell(row, 20);
   const state = cell(row, 21);
   const zip = cell(row, 22);
-  const latStr = cell(row, 23);
-  const lngStr = cell(row, 24);
-  const lat = latStr ? Number(latStr) : null;
-  const lng = lngStr ? Number(lngStr) : null;
+
+  const usesDedicatedNotesCol = looksLikeSetupToken(cell(row, 14));
+  const notesCell = usesDedicatedNotesCol ? cell(row, 12) : "";
+  const estimatedCol = usesDedicatedNotesCol ? 13 : 12;
+  const setupCol = usesDedicatedNotesCol ? 14 : 13;
+  const outsideCol = usesDedicatedNotesCol ? 15 : 14;
+  const distanceCol = usesDedicatedNotesCol ? 16 : 15;
+  const proposedCol = usesDedicatedNotesCol ? 17 : 16;
+  const venmoCol = usesDedicatedNotesCol ? 18 : 17;
+  const line1Col = usesDedicatedNotesCol ? 19 : 18;
+  const line2Col = usesDedicatedNotesCol ? 20 : 19;
+  const cityCol = usesDedicatedNotesCol ? 21 : 20;
+  const stateCol = usesDedicatedNotesCol ? 22 : 21;
+  const zipCol = usesDedicatedNotesCol ? 23 : 22;
+  const latCol = usesDedicatedNotesCol ? 24 : 23;
+  const lngCol = usesDedicatedNotesCol ? 25 : 24;
+  const letteringNormCol = usesDedicatedNotesCol ? 26 : 25;
+  const priceVersionCol = usesDedicatedNotesCol ? 27 : 26;
+  const consentCol = usesDedicatedNotesCol ? 28 : 27;
+  const depRequestedCol = usesDedicatedNotesCol ? 29 : 28;
+  const depPaidCol = usesDedicatedNotesCol ? 30 : 29;
+  const bookingCol = usesDedicatedNotesCol ? 31 : 30;
+  const metadataCol = usesDedicatedNotesCol ? 32 : 31;
+  const lat = (() => {
+    const latStr = cell(row, latCol);
+    return latStr ? Number(latStr) : null;
+  })();
+  const lng = (() => {
+    const lngStr = cell(row, lngCol);
+    return lngStr ? Number(lngStr) : null;
+  })();
 
   const estCents =
-    parseMoneyToCents(cell(row, 12)) ??
-    (Number.isFinite(Number(cell(row, 12)))
-      ? Math.round(Number(cell(row, 12)) * 100)
+    parseMoneyToCents(cell(row, estimatedCol)) ??
+    (Number.isFinite(Number(cell(row, estimatedCol)))
+      ? Math.round(Number(cell(row, estimatedCol)) * 100)
       : 0);
-  const proposedCents = parseMoneyToCents(cell(row, 16));
+  const proposedCents = parseMoneyToCents(cell(row, proposedCol));
 
-  const letteringNorm = cell(row, 25) || normalizeLettering(cell(row, 11));
+  const letteringNorm = cell(row, letteringNormCol) || normalizeLettering(cell(row, 11));
 
   const created = parseIsoDate(cell(row, 0)) ?? new Date();
   const eventStartAt = parseIsoDate(cell(row, 9));
 
+  const metadataValue = cell(row, metadataCol) || null;
   return {
     id,
     createdAt: created,
@@ -136,31 +184,32 @@ export function parseSubmissionRow(row: string[]): SheetSubmission | null {
     eventDate: parseEventDateCell(cell(row, 7)),
     eventTimeLocal,
     eventStartAt,
-    eventAddressLine1: line1,
-    eventAddressLine2: line2Raw || null,
-    eventCity: city,
-    eventState: state,
-    eventPostalCode: zip,
+    eventAddressLine1: cell(row, line1Col) || line1,
+    eventAddressLine2: cell(row, line2Col) || line2Raw || null,
+    eventCity: cell(row, cityCol) || city,
+    eventState: cell(row, stateCol) || state,
+    eventPostalCode: cell(row, zipCol) || zip,
     eventLat: Number.isFinite(lat!) ? lat : null,
     eventLng: Number.isFinite(lng!) ? lng : null,
     distanceMilesFromBase: (() => {
-      const d = Number(cell(row, 15));
+      const d = Number(cell(row, distanceCol));
       return Number.isFinite(d) ? d : null;
     })(),
-    outsideServiceRadius: parseBool(cell(row, 14), false),
-    setupOutdoor: cell(row, 13).toLowerCase() === "outdoor",
+    outsideServiceRadius: parseBool(cell(row, outsideCol), false),
+    setupOutdoor: cell(row, setupCol).toLowerCase() === "outdoor",
     letteringRaw: cell(row, 11),
+    notes: notesCell || extractLegacyNotesFromMetadata(metadataValue ?? "") || null,
     letteringNormalized: letteringNorm,
     estimatedTotalCents: estCents,
-    priceTableVersion: cell(row, 26) || "sheet",
-    consentAccepted: parseBool(cell(row, 27), true),
+    priceTableVersion: cell(row, priceVersionCol) || "sheet",
+    consentAccepted: parseBool(cell(row, consentCol), true),
     pipelineStatus: cell(row, 2) || "pending_request",
     proposedAmountCents: proposedCents,
-    venmoHandle: cell(row, 17) || null,
-    depositRequestedAt: parseIsoDate(cell(row, 28)),
-    depositPaidAt: parseIsoDate(cell(row, 29)),
-    bookingConfirmedAt: parseIsoDate(cell(row, 30)),
-    metadata: cell(row, 31) || null,
+    venmoHandle: cell(row, venmoCol) || null,
+    depositRequestedAt: parseIsoDate(cell(row, depRequestedCol)),
+    depositPaidAt: parseIsoDate(cell(row, depPaidCol)),
+    bookingConfirmedAt: parseIsoDate(cell(row, bookingCol)),
+    metadata: metadataValue,
   };
 }
 
@@ -190,31 +239,32 @@ export function sheetSubmissionToRowValues(sub: SheetSubmission): string[] {
   set(9, sub.eventStartAt?.toISOString() ?? "");
   set(10, displayAddr);
   set(11, sub.letteringRaw);
-  set(12, formatUsd(sub.estimatedTotalCents));
-  set(13, sub.setupOutdoor ? "outdoor" : "indoor");
-  set(14, sub.outsideServiceRadius ? "yes" : "no");
-  set(15, sub.distanceMilesFromBase ?? "");
+  set(12, sub.notes ?? "");
+  set(13, formatUsd(sub.estimatedTotalCents));
+  set(14, sub.setupOutdoor ? "outdoor" : "indoor");
+  set(15, sub.outsideServiceRadius ? "yes" : "no");
+  set(16, sub.distanceMilesFromBase ?? "");
   set(
-    16,
+    17,
     sub.proposedAmountCents != null && sub.proposedAmountCents > 0
       ? formatUsd(sub.proposedAmountCents)
       : "",
   );
-  set(17, sub.venmoHandle ?? "");
-  set(18, sub.eventAddressLine1);
-  set(19, sub.eventAddressLine2 ?? "");
-  set(20, sub.eventCity);
-  set(21, sub.eventState);
-  set(22, sub.eventPostalCode);
-  set(23, sub.eventLat ?? "");
-  set(24, sub.eventLng ?? "");
-  set(25, sub.letteringNormalized);
-  set(26, sub.priceTableVersion);
-  set(27, sub.consentAccepted ? "yes" : "no");
-  set(28, sub.depositRequestedAt?.toISOString() ?? "");
-  set(29, sub.depositPaidAt?.toISOString() ?? "");
-  set(30, sub.bookingConfirmedAt?.toISOString() ?? "");
-  set(31, sub.metadata ?? "");
+  set(18, sub.venmoHandle ?? "");
+  set(19, sub.eventAddressLine1);
+  set(20, sub.eventAddressLine2 ?? "");
+  set(21, sub.eventCity);
+  set(22, sub.eventState);
+  set(23, sub.eventPostalCode);
+  set(24, sub.eventLat ?? "");
+  set(25, sub.eventLng ?? "");
+  set(26, sub.letteringNormalized);
+  set(27, sub.priceTableVersion);
+  set(28, sub.consentAccepted ? "yes" : "no");
+  set(29, sub.depositRequestedAt?.toISOString() ?? "");
+  set(30, sub.depositPaidAt?.toISOString() ?? "");
+  set(31, sub.bookingConfirmedAt?.toISOString() ?? "");
+  set(32, sub.metadata ?? "");
 
   return row;
 }
@@ -237,6 +287,7 @@ export function sheetSubmissionToApiJson(sub: SheetSubmission) {
     eventState: sub.eventState,
     eventPostalCode: sub.eventPostalCode,
     letteringRaw: sub.letteringRaw,
+    notes: sub.notes,
     letteringNormalized: sub.letteringNormalized,
     setupOutdoor: sub.setupOutdoor,
     outsideServiceRadius: sub.outsideServiceRadius,

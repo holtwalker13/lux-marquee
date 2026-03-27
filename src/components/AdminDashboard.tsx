@@ -1,8 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { buildVenmoChargeUrl, depositAmountDollars } from "@/lib/venmo-deposit";
+import {
+  buildVenmoChargeUrl,
+  depositAmountDollars,
+} from "@/lib/venmo-deposit";
 
 type Submission = {
   id: string;
@@ -59,6 +62,25 @@ function downloadIcs(content: string) {
   URL.revokeObjectURL(url);
 }
 
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+}
+
+function openVenmoUrl(url: string) {
+  if (typeof window === "undefined") return;
+  if (isMobileBrowser()) {
+    // iOS/Android often block popup tabs for app handoff; same-tab navigation is more reliable.
+    window.location.assign(url);
+    return;
+  }
+  const popup = window.open(url, "_blank", "noopener,noreferrer");
+  if (!popup) {
+    alert("Popup blocked. We'll open Venmo in this tab instead.");
+    window.location.assign(url);
+  }
+}
+
 function sortedSubmissions(list: Submission[]): Submission[] {
   return [...list].sort((a, b) => {
     const da = PIPELINE_ORDER[a.pipelineStatus] ?? 99;
@@ -66,6 +88,37 @@ function sortedSubmissions(list: Submission[]): Submission[] {
     if (da !== db) return da - db;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
+}
+
+function replaceSubmissionInList(list: Submission[], next: Submission): Submission[] {
+  return sortedSubmissions(list.map((s) => (s.id === next.id ? next : s)));
+}
+
+type BusyKey = "save" | "deposit" | "paid" | "book";
+
+function Spinner({ className }: { className?: string }) {
+  return (
+    <svg
+      className={`size-3.5 shrink-0 animate-spin ${className ?? ""}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
+      <circle
+        className="opacity-30"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="3"
+      />
+      <path
+        className="opacity-90"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+      />
+    </svg>
+  );
 }
 
 function parseDraftDollarsToCents(s: string): number | null {
@@ -93,6 +146,22 @@ function formatEventDateLong(iso: string): string {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function formatTimeAgo(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return "just now";
+  const minutes = Math.floor(diffMs / (1000 * 60));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const weeks = Math.floor(days / 7);
+  return `${weeks} week${weeks === 1 ? "" : "s"} ago`;
 }
 
 function formatTime12h(hhmm: string): string {
@@ -199,9 +268,16 @@ function LetteringPerLetter({ text, compact }: { text: string; compact?: boolean
 }
 
 function compactLocationLine(sub: Submission): string {
+  if (sub.eventAddressLine1.trim().toUpperCase() === "LOCAL PICKUP") {
+    return "Local pickup order";
+  }
   const citySt = [sub.eventCity, sub.eventState].filter(Boolean).join(", ");
   const tail = sub.setupOutdoor ? "outdoor" : "indoor";
   return [citySt, sub.eventAddressLine1, tail].filter(Boolean).join(" · ");
+}
+
+function isPickupOrder(sub: Submission): boolean {
+  return sub.eventAddressLine1.trim().toUpperCase() === "LOCAL PICKUP";
 }
 
 function ChevronDetails({ className }: { className?: string }) {
@@ -275,10 +351,51 @@ export function AdminDashboard() {
     Record<string, { proposed: string; venmo: string }>
   >({});
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState<Record<string, BusyKey>>({});
+  const [feedbackById, setFeedbackById] = useState<Record<string, string>>({});
+  const [invFeedback, setInvFeedback] = useState<string | null>(null);
+  const [availChecking, setAvailChecking] = useState(false);
+  const feedbackTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const load = useCallback(async () => {
-    setLoadError(null);
-    setLoading(true);
+  const showCardFeedback = useCallback((id: string, msg: string) => {
+    const prev = feedbackTimers.current[id];
+    if (prev) clearTimeout(prev);
+    setFeedbackById((f) => ({ ...f, [id]: msg }));
+    feedbackTimers.current[id] = setTimeout(() => {
+      setFeedbackById((f) => {
+        const n = { ...f };
+        delete n[id];
+        return n;
+      });
+      delete feedbackTimers.current[id];
+    }, 2500);
+  }, []);
+
+  useEffect(() => {
+    const timersRef = feedbackTimers;
+    return () => {
+      const pending = timersRef.current;
+      for (const t of Object.values(pending)) clearTimeout(t);
+    };
+  }, []);
+
+  const applyServerSubmission = useCallback((updated: Submission) => {
+    setSubmissions((prev) => replaceSubmissionInList(prev, updated));
+    setDrafts((d) => ({
+      ...d,
+      [updated.id]: {
+        proposed: centsToDollars(updated.proposedAmountCents),
+        venmo: updated.venmoHandle ?? "",
+      },
+    }));
+  }, []);
+
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    if (!silent) {
+      setLoadError(null);
+      setLoading(true);
+    }
     try {
       const [sRes, iRes] = await Promise.all([
         fetch("/api/admin/submissions", { credentials: "same-origin" }),
@@ -301,11 +418,11 @@ export function AdminDashboard() {
       }>(iRes, "inventory");
 
       if (!sParsed.ok) {
-        setLoadError(sParsed.message);
+        if (!silent) setLoadError(sParsed.message);
         return;
       }
       if (!iParsed.ok) {
-        setLoadError(iParsed.message);
+        if (!silent) setLoadError(iParsed.message);
         return;
       }
 
@@ -324,12 +441,35 @@ export function AdminDashboard() {
       }
       setDrafts(nextDrafts);
     } catch (e) {
-      setLoadError(
-        e instanceof Error ? e.message : "Something went wrong loading the admin data.",
-      );
+      if (!silent) {
+        setLoadError(
+          e instanceof Error ? e.message : "Something went wrong loading the admin data.",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
+  }, [router]);
+
+  const refreshInventory = useCallback(async (): Promise<boolean> => {
+    const iRes = await fetch("/api/admin/inventory", { credentials: "same-origin" });
+    if (iRes.status === 401) {
+      router.push("/admin/login");
+      return false;
+    }
+    const iParsed = await parseJsonBody<{ letters?: InvLetter[]; source?: string }>(
+      iRes,
+      "inventory",
+    );
+    if (!iParsed.ok) {
+      alert(iParsed.message);
+      return false;
+    }
+    setLetters(iParsed.data.letters ?? []);
+    setInvSource(iParsed.data.source ?? "");
+    return true;
   }, [router]);
 
   useEffect(() => {
@@ -344,22 +484,26 @@ export function AdminDashboard() {
 
   async function syncInventory() {
     setSyncing(true);
+    setInvFeedback(null);
     try {
       const res = await fetch("/api/admin/inventory/sync", { method: "POST" });
-      const data = (await res.json()) as {
+      const parsed = await parseJsonBody<{
         error?: string;
         count?: number;
         message?: string;
-      };
-      if (!res.ok) {
-        alert(data.error ?? "Check failed");
+      }>(res, "inventory sync");
+      if (!parsed.ok) {
+        alert(parsed.message);
         return;
       }
-      alert(
+      const data = parsed.data;
+      const ok = await refreshInventory();
+      if (!ok) return;
+      const msg =
         data.message ??
-          `Inventory tab OK — ${data.count ?? 0} letter row(s) readable.`,
-      );
-      await load();
+        `Inventory tab OK — ${data.count ?? 0} letter row(s) readable.`;
+      setInvFeedback(msg);
+      window.setTimeout(() => setInvFeedback(null), 4000);
     } finally {
       setSyncing(false);
     }
@@ -367,51 +511,71 @@ export function AdminDashboard() {
 
   async function runAvailabilityCheck() {
     setCheckResult(null);
-    const params = new URLSearchParams({
-      phrase: checkPhrase,
-      date: checkDate,
-      time: checkTime,
-    });
-    const res = await fetch(`/api/admin/availability?${params}`);
-    const data = (await res.json()) as {
-      ok?: boolean;
-      error?: string;
-      issues?: { letter: string; needed: number; available: number; inUse: number }[];
-      normalized?: string;
-    };
-    if (!res.ok) {
-      setCheckResult(data.error ?? "Check failed");
-      return;
-    }
-    if (data.ok) {
-      setCheckResult(`OK for “${data.normalized}” at ${checkDate} ${checkTime}.`);
-    } else {
-      setCheckResult(
-        `Conflict: ${data.issues?.map((i) => `${i.letter} need ${i.needed}, have ${i.available} free (in use ${i.inUse})`).join("; ")}`,
-      );
+    setAvailChecking(true);
+    try {
+      const params = new URLSearchParams({
+        phrase: checkPhrase,
+        date: checkDate,
+        time: checkTime,
+      });
+      const res = await fetch(`/api/admin/availability?${params}`);
+      const data = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        issues?: { letter: string; needed: number; available: number; inUse: number }[];
+        normalized?: string;
+      };
+      if (!res.ok) {
+        setCheckResult(data.error ?? "Check failed");
+        return;
+      }
+      if (data.ok) {
+        setCheckResult(`OK for “${data.normalized}” at ${checkDate} ${checkTime}.`);
+      } else {
+        setCheckResult(
+          `Conflict: ${data.issues?.map((i) => `${i.letter} need ${i.needed}, have ${i.available} free (in use ${i.inUse})`).join("; ")}`,
+        );
+      }
+    } finally {
+      setAvailChecking(false);
     }
   }
 
   async function saveDraft(id: string) {
     const d = drafts[id];
     if (!d) return;
-    const res = await fetch(`/api/admin/submissions/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposedAmountDollars: d.proposed || null,
-        venmoHandle: d.venmo || null,
-      }),
-    });
-    if (!res.ok) {
-      const err = (await res.json()) as { error?: string };
-      alert(err.error ?? "Save failed");
-      return;
+    setActionBusy((b) => ({ ...b, [id]: "save" }));
+    try {
+      const res = await fetch(`/api/admin/submissions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposedAmountDollars: d.proposed || null,
+          venmoHandle: d.venmo || null,
+        }),
+      });
+      const parsed = await parseJsonBody<{ submission?: Submission }>(res, "save");
+      if (!parsed.ok) {
+        alert(parsed.message);
+        return;
+      }
+      if (parsed.data.submission) {
+        applyServerSubmission(parsed.data.submission);
+      } else {
+        void load({ silent: true });
+      }
+      showCardFeedback(id, "Saved to Google Sheet");
+    } finally {
+      setActionBusy((b) => {
+        const n = { ...b };
+        delete n[id];
+        return n;
+      });
     }
-    await load();
   }
 
-  async function requestDeposit(id: string) {
+  async function requestDeposit(sub: Submission) {
+    const id = sub.id;
     const d = drafts[id];
     const venmo = d?.venmo?.trim();
     if (!venmo) {
@@ -420,78 +584,131 @@ export function AdminDashboard() {
       );
       return;
     }
+    setActionBusy((b) => ({ ...b, [id]: "deposit" }));
+    try {
+      const upfrontVenmoUrl = buildVenmoChargeUrl(
+        venmo,
+        DEPOSIT_USD,
+        `Marquee deposit (${sub.letteringRaw.slice(0, 60)})`,
+      );
 
-    const patchRes = await fetch(`/api/admin/submissions/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposedAmountDollars: d?.proposed || null,
-        venmoHandle: venmo,
-      }),
-    });
-    if (!patchRes.ok) {
-      const err = (await patchRes.json()) as { error?: string };
-      alert(err.error ?? "Could not save quote / Venmo.");
-      return;
-    }
+      const patchRes = await fetch(`/api/admin/submissions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposedAmountDollars: d?.proposed || null,
+          venmoHandle: venmo,
+        }),
+      });
+      const patchParsed = await parseJsonBody<{ submission?: Submission }>(
+        patchRes,
+        "quote",
+      );
+      if (!patchParsed.ok) {
+        alert(patchParsed.message);
+        return;
+      }
+      if (patchParsed.data.submission) {
+        applyServerSubmission(patchParsed.data.submission);
+      }
 
-    const res = await fetch(`/api/admin/submissions/${id}/request-deposit`, {
-      method: "POST",
-    });
-    const data = (await res.json()) as {
-      error?: string;
-      venmoUrl?: string;
-      depositAmountDollars?: number;
-    };
-    if (!res.ok) {
-      alert(data.error ?? "Failed");
-      return;
+      const res = await fetch(`/api/admin/submissions/${id}/request-deposit`, {
+        method: "POST",
+      });
+      const depositParsed = await parseJsonBody<{
+        submission?: Submission;
+        venmoUrl?: string;
+        depositAmountDollars?: number;
+      }>(res, "deposit request");
+      if (!depositParsed.ok) {
+        alert(depositParsed.message);
+        return;
+      }
+      if (depositParsed.data.submission) {
+        applyServerSubmission(depositParsed.data.submission);
+      }
+      const venmoUrl = depositParsed.data.venmoUrl || upfrontVenmoUrl;
+      openVenmoUrl(venmoUrl);
+      showCardFeedback(id, "Deposit requested — sheet updated (Venmo opened)");
+    } finally {
+      setActionBusy((b) => {
+        const n = { ...b };
+        delete n[id];
+        return n;
+      });
     }
-    if (data.venmoUrl) {
-      window.open(data.venmoUrl, "_blank", "noopener,noreferrer");
-    }
-    await load();
   }
 
   async function markDepositPaid(id: string) {
-    const res = await fetch(`/api/admin/submissions/${id}/mark-deposit-paid`, {
-      method: "POST",
-    });
-    const data = (await res.json()) as { error?: string };
-    if (!res.ok) {
-      alert(data.error ?? "Failed");
-      return;
+    setActionBusy((b) => ({ ...b, [id]: "paid" }));
+    try {
+      const res = await fetch(`/api/admin/submissions/${id}/mark-deposit-paid`, {
+        method: "POST",
+      });
+      const parsed = await parseJsonBody<{ submission?: Submission }>(res, "mark paid");
+      if (!parsed.ok) {
+        alert(parsed.message);
+        return;
+      }
+      if (parsed.data.submission) {
+        applyServerSubmission(parsed.data.submission);
+      } else {
+        void load({ silent: true });
+      }
+      showCardFeedback(id, "Marked paid — sheet updated");
+    } finally {
+      setActionBusy((b) => {
+        const n = { ...b };
+        delete n[id];
+        return n;
+      });
     }
-    await load();
   }
 
   async function confirmBooking(id: string) {
-    const res = await fetch(`/api/admin/submissions/${id}/confirm-booking`, {
-      method: "POST",
-    });
-    const data = (await res.json()) as {
-      error?: string;
-      issues?: unknown;
-      calendarEmailSent?: boolean;
-      calendarEmailNote?: string;
-      ics?: string;
-    };
-    if (!res.ok) {
-      alert(
-        `${data.error ?? "Failed"}${data.issues ? ` ${JSON.stringify(data.issues)}` : ""}`,
-      );
-      return;
-    }
-    const msg = data.calendarEmailSent
-      ? "Booking confirmed. Calendar invites were emailed to the client and business owner."
-      : `Booking confirmed. ${data.calendarEmailNote ?? "Add calendar manually if needed."}`;
-    alert(msg);
-    if (data.ics && !data.calendarEmailSent) {
-      if (confirm("Download the .ics file to add to iPhone Calendar / Mail?")) {
-        downloadIcs(data.ics);
+    setActionBusy((b) => ({ ...b, [id]: "book" }));
+    try {
+      const res = await fetch(`/api/admin/submissions/${id}/confirm-booking`, {
+        method: "POST",
+      });
+      const parsed = await parseJsonBody<{
+        submission?: Submission;
+        issues?: unknown;
+        calendarEmailSent?: boolean;
+        calendarEmailNote?: string;
+        ics?: string;
+      }>(res, "confirm booking");
+      if (!parsed.ok) {
+        alert(parsed.message);
+        return;
       }
+      const data = parsed.data;
+      if (data.submission) {
+        applyServerSubmission(data.submission);
+      } else {
+        void load({ silent: true });
+      }
+      if (data.calendarEmailNote === "Already booked.") {
+        showCardFeedback(id, "Already booked.");
+        return;
+      }
+      const msg = data.calendarEmailSent
+        ? "Booking confirmed. Calendar invites were emailed to the client and business owner."
+        : `Booking confirmed. ${data.calendarEmailNote ?? "Add calendar manually if needed."}`;
+      alert(msg);
+      if (data.ics && !data.calendarEmailSent) {
+        if (confirm("Download the .ics file to add to iPhone Calendar / Mail?")) {
+          downloadIcs(data.ics);
+        }
+      }
+      showCardFeedback(id, "Booked — letters held · sheet updated");
+    } finally {
+      setActionBusy((b) => {
+        const n = { ...b };
+        delete n[id];
+        return n;
+      });
     }
-    await load();
   }
 
   function openVenmoRemainder(sub: Submission) {
@@ -575,9 +792,14 @@ export function AdminDashboard() {
           {letters.map((l) => (
             <span
               key={l.letter}
-              className="rounded-xl bg-[var(--cream)] px-3 py-1 font-mono text-sm text-[var(--cocoa)]"
+              className="inline-flex items-end gap-1 rounded-xl bg-[var(--cream)] px-3 py-1.5"
             >
-              {l.letter}:{l.totalQuantity}
+              <span className="font-[family-name:var(--font-display)] text-lg font-bold leading-none text-[var(--cocoa)]">
+                {l.letter}
+              </span>
+              <span className="text-xs font-medium text-[var(--cocoa-muted)]">
+                {l.totalQuantity}
+              </span>
             </span>
           ))}
         </div>
@@ -585,89 +807,93 @@ export function AdminDashboard() {
           type="button"
           disabled={syncing}
           onClick={() => void syncInventory()}
-          className="mt-4 rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+          className="mt-4 inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {syncing ? "Checking…" : "Verify Inventory tab"}
+          {syncing ? (
+            <>
+              <Spinner className="text-white" />
+              <span className="animate-pulse">Verifying…</span>
+            </>
+          ) : (
+            "Verify Inventory tab"
+          )}
         </button>
-      </section>
-
-      <section className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6">
-        <h2 className="font-semibold text-[var(--cocoa)]">Availability check</h2>
-        <p className="mt-1 text-xs text-[var(--cocoa-muted)]">
-          A–Z only; uses ±12h window around event time (server EVENT_TIMEZONE,
-          default America/Chicago).
-        </p>
-        <div className="mt-4 flex flex-wrap items-end gap-3">
-          <label className="block">
-            <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
-              Phrase
-            </span>
-            <input
-              value={checkPhrase}
-              onChange={(e) => setCheckPhrase(e.target.value)}
-              className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
-              placeholder="LOVE"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
-              Date
-            </span>
-            <input
-              type="date"
-              value={checkDate}
-              onChange={(e) => setCheckDate(e.target.value)}
-              className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
-              Time
-            </span>
-            <input
-              type="time"
-              value={checkTime}
-              onChange={(e) => setCheckTime(e.target.value)}
-              className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={() => void runAvailabilityCheck()}
-            className="rounded-xl bg-[var(--cocoa)] px-4 py-2 text-sm font-semibold text-white"
-          >
-            Check
-          </button>
-        </div>
-        {checkResult && (
-          <p className="mt-3 text-sm text-[var(--cocoa)]">{checkResult}</p>
-        )}
+        {invFeedback ? (
+          <p className="mt-2 text-sm font-medium text-emerald-800">{invFeedback}</p>
+        ) : null}
+        <details className="mt-4 rounded-2xl border border-[var(--blush)] bg-[var(--cream)]/30 p-4">
+          <summary className="cursor-pointer list-none text-sm font-semibold text-[var(--cocoa)] [&::-webkit-details-marker]:hidden">
+            Availability check
+          </summary>
+          <p className="mt-2 text-xs text-[var(--cocoa-muted)]">
+            A–Z only; uses ±12h window around event time (server EVENT_TIMEZONE,
+            default America/Chicago).
+          </p>
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <label className="block">
+              <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
+                Phrase
+              </span>
+              <input
+                value={checkPhrase}
+                onChange={(e) => setCheckPhrase(e.target.value)}
+                className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
+                placeholder="LOVE"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
+                Date
+              </span>
+              <input
+                type="date"
+                value={checkDate}
+                onChange={(e) => setCheckDate(e.target.value)}
+                className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-semibold text-[var(--cocoa-muted)]">
+                Time
+              </span>
+              <input
+                type="time"
+                value={checkTime}
+                onChange={(e) => setCheckTime(e.target.value)}
+                className="mt-1 block rounded-xl border border-[var(--blush)] px-3 py-2"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={availChecking}
+              onClick={() => void runAvailabilityCheck()}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--cocoa)] px-4 py-2 text-sm font-semibold text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {availChecking ? (
+                <>
+                  <Spinner className="text-white" />
+                  <span className="animate-pulse">Checking…</span>
+                </>
+              ) : (
+                "Check"
+              )}
+            </button>
+          </div>
+          {checkResult && (
+            <p className="mt-3 text-sm text-[var(--cocoa)]">{checkResult}</p>
+          )}
+        </details>
       </section>
 
       <section className="space-y-4">
         <div>
           <h2 className="font-semibold text-[var(--cocoa)]">Submitted requests</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--cocoa-muted)]">
-            <strong className="text-[var(--cocoa)]">Workflow:</strong> (1) Enter{" "}
-            <strong>proposed total</strong> and the client&apos;s{" "}
-            <strong>Venmo @handle</strong>. (2){" "}
-            <strong>Send ${DEPOSIT_USD} deposit request</strong> opens Venmo with a
-            charge link—the client completes payment there (Venmo has no API to auto-request
-            money). <strong>Open Venmo for remainder</strong> uses proposed total − $
-            {DEPOSIT_USD} and stays available <strong>any time</strong> (even after booking)
-            until you cancel the job. (3) When you&apos;ve seen the ${DEPOSIT_USD} in Venmo,
-            click <strong>Mark deposit paid</strong>. (4){" "}
-            <strong>Confirm booking</strong> (after deposit) emails a calendar{" "}
-            <strong>.ics</strong> to the client and <strong>BUSINESS_OWNER_EMAIL</strong>{" "}
-            (set <strong>Resend</strong> in
-            <code className="mx-1 rounded bg-[var(--cream)] px-1 text-xs">.env</code>
-            ), and <strong>locks letters</strong> for this event: each A–Z in the phrase is
-            reserved for <strong>12 hours before through 12 hours after</strong> the event
-            time (overlap checks; sheet quantities are not reduced).
-          </p>
         </div>
         {submissions.map((sub) => {
           const draft = drafts[sub.id];
+          const busy = actionBusy[sub.id];
+          const cardLocked = busy !== undefined;
+          const pickupOrder = isPickupOrder(sub);
           const proposedCents = proposedCentsForSub(sub, draft?.proposed ?? "");
           const remainderCents =
             proposedCents != null ? Math.max(0, proposedCents - DEPOSIT_CENTS) : null;
@@ -679,9 +905,9 @@ export function AdminDashboard() {
             !depositPaid &&
             (sub.pipelineStatus === "deposit_requested" || sub.depositRequestedAt != null);
 
-          const quoteInputs = (
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="block text-xs">
+          const quoteFieldsOnly = (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-xs sm:col-span-2">
                 <span className="font-semibold text-[var(--cocoa)]">Proposed ($)</span>
                 <input
                   value={drafts[sub.id]?.proposed ?? ""}
@@ -694,11 +920,12 @@ export function AdminDashboard() {
                       },
                     }))
                   }
-                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm"
+                  disabled={cardLocked}
+                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                   placeholder="0.00"
                 />
               </label>
-              <label className="block text-xs">
+              <label className="block text-xs sm:col-span-2">
                 <span className="font-semibold text-[var(--cocoa)]">Venmo @</span>
                 <input
                   value={drafts[sub.id]?.venmo ?? ""}
@@ -711,13 +938,73 @@ export function AdminDashboard() {
                       },
                     }))
                   }
-                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm"
+                  disabled={cardLocked}
+                  className="mt-0.5 w-full rounded-lg border border-[var(--blush)] bg-white px-2.5 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                   placeholder="handle"
                 />
-                <span className="mt-0.5 block text-[10px] leading-tight text-[var(--cocoa-muted)]">
-                  Client handle for deposit + balance.
-                </span>
               </label>
+            </div>
+          );
+
+          const canRequestDeposit =
+            sub.pipelineStatus !== "booked" &&
+            sub.pipelineStatus !== "cancelled" &&
+            sub.pipelineStatus !== "deposit_paid";
+
+          const canMarkPaid =
+            sub.pipelineStatus !== "cancelled" && sub.pipelineStatus !== "booked";
+
+          const canConfirmBooking =
+            sub.pipelineStatus !== "cancelled" && sub.pipelineStatus !== "booked";
+
+          const requestDepositCta = (
+            <button
+              type="button"
+              onClick={() => void requestDeposit(sub)}
+              disabled={cardLocked || !canRequestDeposit}
+              className="inline-flex w-full min-h-[2.75rem] items-center justify-center gap-2 rounded-lg bg-[#008cff] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+              title={`Saves total + handle to the sheet, opens Venmo for $${DEPOSIT_USD}`}
+            >
+              {busy === "deposit" ? (
+                <>
+                  <Spinner className="text-white" />
+                  <span className="animate-pulse">Sending…</span>
+                </>
+              ) : (
+                "Request deposit"
+              )}
+            </button>
+          );
+
+          const depositRequestBlock = (
+            <div className="space-y-3">
+              {quoteFieldsOnly}
+              {requestDepositCta}
+              <p className="text-[10px] leading-snug text-[var(--cocoa-muted)]">
+                One step: saves the handle and quote to Google Sheets, opens Venmo for the $
+                {DEPOSIT_USD} deposit, and marks the job as deposit requested.
+              </p>
+            </div>
+          );
+
+          const quoteDetailsEditor = (
+            <div className="space-y-3">
+              {quoteFieldsOnly}
+              <button
+                type="button"
+                onClick={() => void saveDraft(sub.id)}
+                disabled={cardLocked}
+                className="rounded-lg border border-[var(--blush)] bg-white px-3 py-2 text-xs font-semibold text-[var(--cocoa)] transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy === "save" ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <Spinner />
+                    Saving…
+                  </span>
+                ) : (
+                  "Save quote to sheet (no Venmo)"
+                )}
+              </button>
             </div>
           );
 
@@ -800,39 +1087,35 @@ export function AdminDashboard() {
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => void saveDraft(sub.id)}
-                className="rounded-xl border border-[var(--blush)] px-2 py-2.5 text-center text-xs font-semibold leading-snug sm:text-sm"
-              >
-                Save quote &amp; Venmo only
-              </button>
-              <button
-                type="button"
-                onClick={() => void requestDeposit(sub.id)}
-                disabled={
-                  sub.pipelineStatus === "booked" ||
-                  sub.pipelineStatus === "cancelled"
-                }
-                className="rounded-xl bg-[#008cff] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
-                title="Saves fields, then opens Venmo charge link"
-              >
-                Send ${DEPOSIT_USD} deposit (Venmo)
-              </button>
-              <button
-                type="button"
                 onClick={() => void markDepositPaid(sub.id)}
-                disabled={sub.pipelineStatus !== "deposit_requested"}
-                className="rounded-xl bg-amber-600 px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
+                disabled={cardLocked || !canMarkPaid}
+                className="inline-flex min-h-[2.75rem] items-center justify-center gap-1.5 rounded-xl bg-[var(--coral)] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+                title="Manual step when you have the deposit in Venmo"
               >
-                Mark deposit paid
+                {busy === "paid" ? (
+                  <>
+                    <Spinner className="text-white" />
+                    <span className="animate-pulse">Updating…</span>
+                  </>
+                ) : (
+                  "Mark as paid"
+                )}
               </button>
               <button
                 type="button"
                 onClick={() => void confirmBooking(sub.id)}
-                disabled={sub.pipelineStatus !== "deposit_paid"}
-                className="rounded-xl bg-emerald-600 px-2 py-2.5 text-center text-xs font-bold leading-snug text-white disabled:opacity-40 sm:text-sm"
-                title="Creates letter holds ±12h; emails .ics if Resend is configured"
+                disabled={cardLocked || !canConfirmBooking}
+                className="inline-flex min-h-[2.75rem] items-center justify-center gap-1.5 rounded-xl bg-[var(--coral)] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+                title="Locks letters ±12h; emails .ics if Resend is configured. Confirm only after you are satisfied deposit is handled."
               >
-                Confirm booking + calendar
+                {busy === "book" ? (
+                  <>
+                    <Spinner className="text-white" />
+                    <span className="animate-pulse">Confirming…</span>
+                  </>
+                ) : (
+                  "Confirm booking"
+                )}
               </button>
             </div>
           );
@@ -848,15 +1131,25 @@ export function AdminDashboard() {
                     <h3 className="text-base font-semibold leading-tight text-[var(--cocoa)]">
                       {sub.contactName}
                     </h3>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase leading-none sm:text-xs ${
-                        sub.pipelineStatus === "booked"
-                          ? "bg-emerald-100 text-emerald-900"
-                          : "bg-[var(--blush)] text-[var(--cocoa)]"
-                      }`}
-                    >
-                      {sub.pipelineStatus.replace(/_/g, " ")}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {pickupOrder ? (
+                        <span className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold uppercase leading-none text-indigo-900 sm:text-xs">
+                          Pickup
+                        </span>
+                      ) : null}
+                      <span className="text-[10px] font-medium text-[var(--cocoa-muted)] sm:text-xs">
+                        {formatTimeAgo(sub.createdAt)}
+                      </span>
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase leading-none sm:text-xs ${
+                          sub.pipelineStatus === "booked"
+                            ? "bg-emerald-100 text-emerald-900"
+                            : "bg-[var(--blush)] text-[var(--cocoa)]"
+                        }`}
+                      >
+                        {sub.pipelineStatus.replace(/_/g, " ")}
+                      </span>
+                    </div>
                   </div>
                   <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
                     <span className="break-all">{sub.contactEmail}</span>
@@ -909,50 +1202,32 @@ export function AdminDashboard() {
                   Next step
                 </p>
                 <div className="mt-2 space-y-2.5">
-                  {sub.pipelineStatus === "pending_request" && (
+                  {(sub.pipelineStatus === "pending_request" ||
+                    sub.pipelineStatus === "deposit_requested") && (
                     <>
-                      {quoteInputs}
-                      <button
-                        type="button"
-                        onClick={() => void requestDeposit(sub.id)}
-                        className="w-full rounded-lg bg-[#008cff] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 sm:w-auto sm:min-w-[12rem]"
-                        title="Saves fields, then opens Venmo charge link"
-                      >
-                        Send ${DEPOSIT_USD} deposit (opens Venmo)
-                      </button>
-                    </>
-                  )}
-                  {sub.pipelineStatus === "deposit_requested" && (
-                    <>
-                      <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
-                        Waiting for ${DEPOSIT_USD} in Venmo.
-                        {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "").trim() ? (
-                          <span className="mt-0.5 block font-mono text-sm text-[var(--cocoa)]">
-                            @
-                            {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "")
-                              .trim()
-                              .replace(/^@/, "")}
-                          </span>
-                        ) : null}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => void markDepositPaid(sub.id)}
-                        className="w-full rounded-lg bg-amber-600 px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm sm:w-auto sm:min-w-[12rem]"
-                      >
-                        Mark ${DEPOSIT_USD} deposit paid
-                      </button>
+                      {sub.pipelineStatus === "deposit_requested" ? (
+                        <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
+                          Waiting for ${DEPOSIT_USD} in Venmo.
+                          {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "").trim() ? (
+                            <span className="mt-0.5 block font-mono text-sm text-[var(--cocoa)]">
+                              @
+                              {(drafts[sub.id]?.venmo ?? sub.venmoHandle ?? "")
+                                .trim()
+                                .replace(/^@/, "")}
+                            </span>
+                          ) : null}
+                          You can tap Request deposit again to reopen Venmo.
+                        </p>
+                      ) : null}
+                      {depositRequestBlock}
                     </>
                   )}
                   {sub.pipelineStatus === "deposit_paid" && (
-                    <button
-                      type="button"
-                      onClick={() => void confirmBooking(sub.id)}
-                      className="w-full rounded-lg bg-emerald-600 px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm sm:w-auto sm:min-w-[14rem]"
-                      title="Creates letter holds ±12h; emails .ics if Resend is configured"
-                    >
-                      Confirm booking + calendar invites
-                    </button>
+                    <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
+                      Deposit marked paid on your side. Use{" "}
+                      <span className="font-semibold text-[var(--cocoa)]">Quick actions</span>{" "}
+                      to confirm booking when you are ready (writes holds + official sheet state).
+                    </p>
                   )}
                   {sub.pipelineStatus === "booked" && (
                     <>
@@ -962,11 +1237,13 @@ export function AdminDashboard() {
                       <button
                         type="button"
                         onClick={() => openVenmoRemainder(sub)}
-                        disabled={remainderCents == null || remainderCents <= 0}
-                        className="w-full rounded-lg border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] transition hover:bg-[#fff8f6] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+                        disabled={
+                          cardLocked || remainderCents == null || remainderCents <= 0
+                        }
+                        className="w-full rounded-lg border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] transition hover:bg-[#fff8f6] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
                       >
                         {remainderCents != null && remainderCents > 0
-                          ? `Open Venmo for remainder ($${formatMoneyCents(remainderCents)})`
+                          ? `Send remainder ($${formatMoneyCents(remainderCents)})`
                           : `No remainder (total ≤ $${DEPOSIT_USD})`}
                       </button>
                     </>
@@ -979,6 +1256,34 @@ export function AdminDashboard() {
                 </div>
               </div>
 
+              <div className="mt-2.5 space-y-2.5 rounded-xl border border-[var(--blush)] bg-[var(--cream)]/30 p-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                  Quick actions
+                </p>
+                {feedbackById[sub.id] ? (
+                  <p className="text-center text-[11px] font-medium text-emerald-800 animate-pulse">
+                    {feedbackById[sub.id]}
+                  </p>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => openVenmoRemainder(sub)}
+                  disabled={
+                    cardLocked ||
+                    sub.pipelineStatus === "cancelled" ||
+                    remainderCents == null ||
+                    remainderCents <= 0
+                  }
+                  className="w-full rounded-xl bg-[#008cff] px-3 py-2.5 text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Opens Venmo for the balance after the deposit"
+                >
+                  {remainderCents != null && remainderCents > 0
+                    ? `Send remainder ($${formatMoneyCents(remainderCents)})`
+                    : `Send remainder (set proposed total above $${DEPOSIT_USD})`}
+                </button>
+                {actionGrid}
+              </div>
+
               <details className="group mt-3 overflow-hidden rounded-xl border border-[var(--blush)] bg-[var(--cream)]/25">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-xs font-semibold text-[var(--cocoa)] sm:text-sm [&::-webkit-details-marker]:hidden">
                   <span>Event details, pricing &amp; all actions</span>
@@ -987,7 +1292,7 @@ export function AdminDashboard() {
                 <div className="space-y-4 border-t border-[var(--blush)] px-4 pb-4 pt-4">
                   <p className="font-mono text-xs text-[var(--cocoa-muted)]">{sub.id}</p>
                   <p className="text-sm capitalize text-[var(--cocoa-muted)]">
-                    {eventTypeLabel(sub.eventType)}
+                    {pickupOrder ? "pickup order" : eventTypeLabel(sub.eventType)}
                   </p>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa)]">
                     <span className="inline-flex items-center gap-1.5">
@@ -1003,11 +1308,17 @@ export function AdminDashboard() {
                   <p className="flex items-start gap-2 text-sm text-[var(--cocoa-muted)]">
                     <IconMapPin className="mt-0.5 shrink-0 text-[var(--coral)]" />
                     <span>
-                      {sub.eventAddressLine1}, {sub.eventCity}, {sub.eventState}{" "}
-                      {sub.eventPostalCode}
-                      <span className="text-[var(--cocoa)]">
-                        {sub.setupOutdoor ? " · Outdoor setup" : " · Indoor setup"}
-                      </span>
+                      {pickupOrder ? (
+                        "Local pickup order"
+                      ) : (
+                        <>
+                          {sub.eventAddressLine1}, {sub.eventCity}, {sub.eventState}{" "}
+                          {sub.eventPostalCode}
+                          <span className="text-[var(--cocoa)]">
+                            {sub.setupOutdoor ? " · Outdoor setup" : " · Indoor setup"}
+                          </span>
+                        </>
+                      )}
                     </span>
                   </p>
 
@@ -1058,34 +1369,16 @@ export function AdminDashboard() {
                     <div className="mt-2">{pricingStack}</div>
                   </div>
 
-                  {sub.pipelineStatus !== "pending_request" ? (
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                        Edit proposed total &amp; Venmo
-                      </p>
-                      <div className="mt-2">{quoteInputs}</div>
-                    </div>
-                  ) : null}
-
                   <div>
-                    <button
-                      type="button"
-                      onClick={() => openVenmoRemainder(sub)}
-                      disabled={
-                        sub.pipelineStatus === "cancelled" ||
-                        remainderCents == null ||
-                        remainderCents <= 0
-                      }
-                      className="w-full rounded-xl border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] shadow-sm transition hover:bg-[#fff8f6] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
-                      title="Opens Venmo for the balance after the deposit"
-                    >
-                      {remainderCents != null && remainderCents > 0
-                        ? `Open Venmo for remainder ($${formatMoneyCents(remainderCents)})`
-                        : `Open Venmo for remainder (proposed total must exceed $${DEPOSIT_USD})`}
-                    </button>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                      Edit proposed total &amp; Venmo
+                    </p>
+                    <div className="mt-2">{quoteDetailsEditor}</div>
                   </div>
 
-                  {actionGrid}
+                  <p className="text-xs text-[var(--cocoa-muted)]">
+                    All major actions are available above in Quick actions.
+                  </p>
 
                   {sub.pipelineStatus === "booked" && (
                     <p className="text-xs text-emerald-800">
@@ -1101,6 +1394,22 @@ export function AdminDashboard() {
         {submissions.length === 0 && (
           <p className="text-[var(--cocoa-muted)]">No submissions yet.</p>
         )}
+        <p className="max-w-3xl text-sm leading-relaxed text-[var(--cocoa-muted)]">
+          <strong className="text-[var(--cocoa)]">Workflow:</strong> (1) Enter{" "}
+          <strong>proposed total</strong> and <strong>Venmo @</strong>, then tap{" "}
+          <strong>Request deposit</strong>—that saves to the sheet and opens Venmo for $
+          {DEPOSIT_USD}. (2) When you have the deposit, tap <strong>Mark as paid</strong>{" "}
+          (available any time before booking). (3) When you are ready for official holds, tap{" "}
+          <strong>Confirm booking</strong>. <strong>Send remainder</strong> uses proposed
+          total − ${DEPOSIT_USD} and stays available <strong>any time</strong> (even after
+          booking) until you cancel the job. (4) Confirm booking emails a calendar{" "}
+          <strong>.ics</strong> to the client and <strong>BUSINESS_OWNER_EMAIL</strong>{" "}
+          (set <strong>Resend</strong> in
+          <code className="mx-1 rounded bg-[var(--cream)] px-1 text-xs">.env</code>
+          ), and <strong>locks letters</strong> for this event: each A–Z in the phrase is
+          reserved for <strong>12 hours before through 12 hours after</strong> the event
+          time (overlap checks; sheet quantities are not reduced).
+        </p>
       </section>
     </div>
   );

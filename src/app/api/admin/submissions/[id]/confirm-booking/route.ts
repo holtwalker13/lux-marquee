@@ -26,11 +26,18 @@ export async function POST(_req: Request, ctx: Ctx) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
 
-  if (sub.pipelineStatus !== "deposit_paid") {
-    return NextResponse.json(
-      { error: "Confirm booking only after the deposit is marked paid." },
-      { status: 400 },
-    );
+  if (sub.pipelineStatus === "cancelled") {
+    return NextResponse.json({ error: "This request is cancelled." }, { status: 400 });
+  }
+
+  if (sub.pipelineStatus === "booked") {
+    const latest = await findSubmissionById(id);
+    if (!latest) return NextResponse.json({ error: "Not found." }, { status: 404 });
+    return NextResponse.json({
+      submission: sheetSubmissionToApiJson(latest),
+      calendarEmailSent: false,
+      calendarEmailNote: "Already booked.",
+    });
   }
 
   if (!sub.eventStartAt) {

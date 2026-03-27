@@ -2,6 +2,7 @@ import { jwtVerify } from "jose";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { COOKIE_NAME, getJwtSecretKey } from "@/lib/admin-auth";
+import { absoluteUrl } from "@/lib/public-request-origin";
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -10,7 +11,7 @@ export async function middleware(req: NextRequest) {
 
   const token = req.cookies.get(COOKIE_NAME)?.value;
   if (!token) {
-    return NextResponse.redirect(new URL("/admin/login", req.url));
+    return NextResponse.redirect(absoluteUrl(req, "/admin/login"));
   }
 
   try {
@@ -18,12 +19,12 @@ export async function middleware(req: NextRequest) {
     try {
       secret = getJwtSecretKey();
     } catch {
-      return NextResponse.redirect(new URL("/admin/login", req.url));
+      return NextResponse.redirect(absoluteUrl(req, "/admin/login"));
     }
     await jwtVerify(token, secret);
     return NextResponse.next();
   } catch {
-    return NextResponse.redirect(new URL("/admin/login", req.url));
+    return NextResponse.redirect(absoluteUrl(req, "/admin/login"));
   }
 }
 

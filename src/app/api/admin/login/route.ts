@@ -21,7 +21,8 @@ export async function POST(req: Request) {
     );
   }
 
-  if (String(body.passcode ?? "") !== expected) {
+  const provided = String(body.passcode ?? "").trim();
+  if (provided !== expected) {
     return NextResponse.json({ error: "Invalid passcode." }, { status: 401 });
   }
 

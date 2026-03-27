@@ -5,7 +5,7 @@ import {
   normalizeLettering,
   validateLetteringNormalized,
 } from "@/lib/pricing";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const EVENT_OPTIONS: { value: string; label: string; emoji: string }[] = [
   { value: "wedding", label: "Wedding", emoji: "💒" },
@@ -36,7 +36,86 @@ type LocationPreview =
     }
   | { status: "error"; message: string };
 
+type PlaceComponent = {
+  long_name?: string;
+  short_name?: string;
+  types?: string[];
+};
+
+type PlaceResult = {
+  address_components?: PlaceComponent[];
+  formatted_address?: string;
+};
+
+type PlacesListener = { remove?: () => void };
+
+type PlacesAutocomplete = {
+  addListener: (eventName: string, handler: () => void) => PlacesListener;
+  getPlace: () => PlaceResult;
+};
+
+type PlacesAutocompleteCtor = new (
+  input: HTMLInputElement,
+  options: {
+    types?: string[];
+    fields?: string[];
+    componentRestrictions?: { country: string | string[] };
+  },
+) => PlacesAutocomplete;
+
+type GoogleMapsLike = {
+  maps?: {
+    places?: { Autocomplete?: PlacesAutocompleteCtor };
+    event?: { removeListener: (listener: PlacesListener) => void };
+  };
+};
+
+declare global {
+  interface Window {
+    google?: GoogleMapsLike;
+    __googlePlacesLoader?: Promise<void>;
+  }
+}
+
+function loadGooglePlaces(apiKey: string): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (window.google?.maps?.places) return Promise.resolve();
+  if (window.__googlePlacesLoader) return window.__googlePlacesLoader;
+
+  window.__googlePlacesLoader = new Promise<void>((resolve, reject) => {
+    const existing = document.getElementById("google-places-script");
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Google Places failed to load.")), {
+        once: true,
+      });
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "google-places-script";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Google Places failed to load."));
+    document.head.appendChild(script);
+  });
+
+  return window.__googlePlacesLoader;
+}
+
+function placeAddressPart(
+  components: PlaceComponent[],
+  type: string,
+  short = false,
+): string {
+  const part = components.find((c) => (c.types ?? []).includes(type));
+  if (!part) return "";
+  return short ? String(part.short_name ?? "") : String(part.long_name ?? "");
+}
+
 export function QuoteQuestionnaire() {
+  const [screen, setScreen] = useState<1 | 2>(1);
   const [eventType, setEventType] = useState("wedding");
   const [eventDate, setEventDate] = useState("");
   const [eventTime, setEventTime] = useState("17:00");
@@ -72,6 +151,9 @@ export function QuoteQuestionnaire() {
   const [locationPreview, setLocationPreview] = useState<LocationPreview>({
     status: "idle",
   });
+  const [placesEnabled, setPlacesEnabled] = useState(false);
+  const addressInputRef = useRef<HTMLInputElement | null>(null);
+  const autocompleteRef = useRef<PlacesAutocomplete | null>(null);
 
   const [contactName, setContactName] = useState("");
   const [contactEmail, setContactEmail] = useState("");
@@ -94,6 +176,10 @@ export function QuoteQuestionnaire() {
   );
 
   const letteringFormatOk = letteringValidation === true;
+  const pickupOnly = useMemo(
+    () => /^\d{1,4}$/.test(normalizedPreview),
+    [normalizedPreview],
+  );
 
   const letteringHint = useMemo(() => {
     if (normalizedPreview.length === 0) {
@@ -221,11 +307,70 @@ export function QuoteQuestionnaire() {
     };
   }, [debouncedAddressKey]);
 
+  useEffect(() => {
+    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim();
+    const input = addressInputRef.current;
+    if (!apiKey || !input) return;
+
+    let cancelled = false;
+    let listener: PlacesListener | null = null;
+
+    void loadGooglePlaces(apiKey)
+      .then(() => {
+        if (cancelled || !addressInputRef.current || autocompleteRef.current) return;
+        const g = window.google;
+        if (!g?.maps?.places?.Autocomplete) return;
+
+        const ac = new g.maps.places.Autocomplete(addressInputRef.current, {
+          types: ["address"],
+          fields: ["address_components", "formatted_address"],
+          componentRestrictions: { country: "us" },
+        });
+        autocompleteRef.current = ac;
+        setPlacesEnabled(true);
+
+        listener = ac.addListener("place_changed", () => {
+          const place = ac.getPlace();
+          const comps = Array.isArray(place?.address_components)
+            ? place.address_components
+            : [];
+          const streetNumber = placeAddressPart(comps, "street_number");
+          const route = placeAddressPart(comps, "route");
+          const city =
+            placeAddressPart(comps, "locality") ||
+            placeAddressPart(comps, "postal_town") ||
+            placeAddressPart(comps, "sublocality");
+          const state = placeAddressPart(comps, "administrative_area_level_1", true);
+          const zip = placeAddressPart(comps, "postal_code");
+          const zipSuffix = placeAddressPart(comps, "postal_code_suffix");
+
+          const street = [streetNumber, route].filter(Boolean).join(" ").trim();
+          if (street) setEventAddressLine1(street);
+          if (city) setEventCity(city);
+          if (state) setEventState(state.toUpperCase().slice(0, 2));
+          if (zip) {
+            setEventPostalCode(zipSuffix ? `${zip}-${zipSuffix}` : zip);
+          }
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setPlacesEnabled(false);
+      });
+
+    return () => {
+      cancelled = true;
+      if (listener && window.google?.maps?.event?.removeListener) {
+        window.google.maps.event.removeListener(listener);
+      }
+      autocompleteRef.current = null;
+    };
+  }, []);
+
   const { hasSchedule, hasLettering } = useMemo(() => {
-    const hasSchedule = Boolean(eventDate) && addressComplete;
+    const hasSchedule = Boolean(eventDate) && (pickupOnly || addressComplete);
     const hasLettering = letteringFormatOk;
     return { hasSchedule, hasLettering };
-  }, [eventDate, addressComplete, letteringFormatOk]);
+  }, [eventDate, addressComplete, letteringFormatOk, pickupOnly]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -245,15 +390,15 @@ export function QuoteQuestionnaire() {
           contactName,
           contactEmail,
           contactPhone,
-          eventType,
+          eventType: pickupOnly ? "other" : eventType,
           eventDate,
           eventTime,
-          eventAddressLine1,
-          eventAddressLine2,
-          eventCity,
-          eventState: eventState.trim().toUpperCase().slice(0, 2),
-          eventPostalCode,
-          setupOutdoor,
+          eventAddressLine1: pickupOnly ? "" : eventAddressLine1,
+          eventAddressLine2: pickupOnly ? "" : eventAddressLine2,
+          eventCity: pickupOnly ? "" : eventCity,
+          eventState: pickupOnly ? "" : eventState.trim().toUpperCase().slice(0, 2),
+          eventPostalCode: pickupOnly ? "" : eventPostalCode,
+          setupOutdoor: pickupOnly ? false : setupOutdoor,
           lettering,
           notes,
           consentAccepted: consent,
@@ -331,11 +476,9 @@ export function QuoteQuestionnaire() {
       </header>
 
       <ol className="flex flex-wrap items-center justify-center gap-3 text-sm font-semibold">
-        <StepPill n={1} label="Event" active={!hasSchedule} done={hasSchedule} />
+        <StepPill n={1} label="Letters" active={screen === 1} done={screen > 1} />
         <span className="text-[var(--cocoa-muted)]">·</span>
-        <StepPill n={2} label="Lettering" active={hasSchedule && !hasLettering} done={hasLettering} />
-        <span className="text-[var(--cocoa-muted)]">·</span>
-        <StepPill n={3} label="Contact" active={hasSchedule && hasLettering} done={false} />
+        <StepPill n={2} label="Event + Contact" active={screen === 2} done={false} />
       </ol>
 
       {/* Honeypot */}
@@ -354,47 +497,119 @@ export function QuoteQuestionnaire() {
         />
       </div>
 
-      <section className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6 shadow-md shadow-[#c4a59a]/10 sm:p-8">
+      {screen === 1 && (
+        <>
+          <section className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6 shadow-md shadow-[#c4a59a]/10 sm:p-8">
+            <h2 className="font-[family-name:var(--font-display)] text-2xl text-[var(--cocoa)]">
+              What should the letters spell?
+            </h2>
+            <div className="mt-6">
+              <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
+                What are we celebrating?
+              </span>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {EVENT_OPTIONS.map((opt) => (
+                  <label
+                    key={opt.value}
+                    className={`flex cursor-pointer flex-col items-center rounded-2xl border-2 px-2 py-3 text-center transition hover:border-[var(--coral)] ${
+                      eventType === opt.value
+                        ? "border-[var(--coral)] bg-[var(--blush)]"
+                        : "border-transparent bg-[var(--cream)]"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="eventType"
+                      value={opt.value}
+                      checked={eventType === opt.value}
+                      onChange={() => setEventType(opt.value)}
+                      className="sr-only"
+                    />
+                    <span className="text-2xl" aria-hidden>
+                      {opt.emoji}
+                    </span>
+                    <span className="mt-1 text-sm font-semibold text-[var(--cocoa)]">
+                      {opt.label}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <p className="mt-1 text-[var(--cocoa-muted)]">
+              Examples: <span className="font-medium text-[var(--cocoa)]">3</span>,{" "}
+              <span className="font-medium text-[var(--cocoa)]">LOVE</span>,{" "}
+              <span className="font-medium text-[var(--cocoa)]">BABY GIRL</span> — use
+              spaces between words if you like.
+            </p>
+            <label className="mt-6 block">
+              <span className="sr-only">Lettering</span>
+              <input
+                type="text"
+                value={lettering}
+                onChange={(e) => setLettering(e.target.value)}
+                maxLength={LETTERING_MAX_LENGTH}
+                placeholder="Type your letters…"
+                className="w-full rounded-2xl border-2 border-dashed border-[var(--blush)] bg-white px-4 py-4 font-[family-name:var(--font-display)] text-2xl tracking-wide text-[var(--cocoa)] outline-none ring-[var(--coral)] placeholder:text-[var(--cocoa-muted)] focus:border-[var(--coral)] focus:ring-2 sm:text-3xl"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <span className="mt-2 block text-right text-xs text-[var(--cocoa-muted)]">
+                {lettering.length}/{LETTERING_MAX_LENGTH}
+              </span>
+            </label>
+
+            <div className="mt-6 rounded-3xl bg-gradient-to-br from-[var(--blush)] to-[#fce8e0] p-6 shadow-lg shadow-[#e8a89a]/25">
+              <p className="text-sm font-semibold uppercase tracking-wider text-[var(--cocoa-muted)]">
+                Your quote
+              </p>
+              <p
+                className={`mt-3 text-lg leading-relaxed ${
+                  letteringHint.tone === "error"
+                    ? "font-medium text-red-800"
+                    : letteringHint.tone === "ok"
+                      ? "text-[var(--cocoa)]"
+                      : "text-[var(--cocoa-muted)]"
+                }`}
+              >
+                {letteringHint.text}
+              </p>
+              {pickupOnly ? (
+                <p className="mt-3 text-sm font-medium text-[var(--cocoa)]">
+                  1-4 digits detected: this will be treated as a local pickup order.
+                </p>
+              ) : null}
+              <p className="mt-4 text-sm leading-relaxed text-[var(--cocoa-muted)]">
+                We’ll review what you’ve entered and get back to you with pricing.
+                Nothing here is final until you hear from us.
+              </p>
+            </div>
+          </section>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setScreen(2)}
+              disabled={!hasLettering || normalizedPreview.length === 0}
+              className="rounded-2xl bg-[var(--coral)] px-6 py-3 text-base font-bold text-white shadow-lg shadow-[#e07a6e]/35 transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Continue
+            </button>
+          </div>
+        </>
+      )}
+
+      {screen === 2 && (
+        <>
+          <section className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6 shadow-md shadow-[#c4a59a]/10 sm:p-8">
         <h2 className="font-[family-name:var(--font-display)] text-2xl text-[var(--cocoa)]">
           Your event
         </h2>
         <p className="mt-1 text-[var(--cocoa-muted)]">
-          When’s the big day, and where should we deliver &amp; set up? We measure
-          distance from Jackson, MO to plan travel.
+          {pickupOnly
+            ? "Local pickup order — tell us when you need it and your contact details."
+            : "When’s the big day, and where should we deliver & set up? We measure distance from Jackson, MO to plan travel."}
         </p>
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
-              What are we celebrating?
-            </span>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {EVENT_OPTIONS.map((opt) => (
-                <label
-                  key={opt.value}
-                  className={`flex cursor-pointer flex-col items-center rounded-2xl border-2 px-2 py-3 text-center transition hover:border-[var(--coral)] ${
-                    eventType === opt.value
-                      ? "border-[var(--coral)] bg-[var(--blush)]"
-                      : "border-transparent bg-[var(--cream)]"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="eventType"
-                    value={opt.value}
-                    checked={eventType === opt.value}
-                    onChange={() => setEventType(opt.value)}
-                    className="sr-only"
-                  />
-                  <span className="text-2xl" aria-hidden>
-                    {opt.emoji}
-                  </span>
-                  <span className="mt-1 text-sm font-semibold text-[var(--cocoa)]">
-                    {opt.label}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
           <div className="grid gap-4 sm:col-span-2 sm:grid-cols-2">
             <label className="block">
               <span className="mb-2 block text-sm font-semibold text-[var(--cocoa)]">
@@ -422,7 +637,8 @@ export function QuoteQuestionnaire() {
             </label>
           </div>
 
-          <div className="sm:col-span-2">
+          {!pickupOnly ? (
+            <div className="sm:col-span-2">
             <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
               Event venue address
             </span>
@@ -432,6 +648,7 @@ export function QuoteQuestionnaire() {
                   Street address
                 </span>
                 <input
+                  ref={addressInputRef}
                   required
                   value={eventAddressLine1}
                   onChange={(e) => setEventAddressLine1(e.target.value)}
@@ -439,6 +656,11 @@ export function QuoteQuestionnaire() {
                   placeholder="123 Main St"
                   className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
                 />
+                {placesEnabled ? (
+                  <span className="mt-1 block text-[11px] text-[var(--cocoa-muted)]">
+                    Suggestions powered by Google Places.
+                  </span>
+                ) : null}
               </label>
               <label className="block sm:col-span-2">
                 <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
@@ -498,9 +720,11 @@ export function QuoteQuestionnaire() {
                 </label>
               </div>
             </div>
-          </div>
+            </div>
+          ) : null}
 
-          <div className="sm:col-span-2">
+          {!pickupOnly ? (
+            <div className="sm:col-span-2">
             <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
               Setup location
             </span>
@@ -534,9 +758,10 @@ export function QuoteQuestionnaire() {
                 Outdoor
               </button>
             </div>
-          </div>
+            </div>
+          ) : null}
 
-          {addressComplete && (
+          {!pickupOnly && addressComplete && (
             <div
               className="rounded-2xl border border-[var(--blush)] bg-[var(--cream)] px-4 py-3 text-sm sm:col-span-2"
               aria-live="polite"
@@ -590,55 +815,6 @@ export function QuoteQuestionnaire() {
               className="w-full resize-y rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
             />
           </label>
-        </div>
-      </section>
-
-      <section className="rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-6 shadow-md shadow-[#c4a59a]/10 sm:p-8">
-        <h2 className="font-[family-name:var(--font-display)] text-2xl text-[var(--cocoa)]">
-          What should the letters spell?
-        </h2>
-        <p className="mt-1 text-[var(--cocoa-muted)]">
-          Examples: <span className="font-medium text-[var(--cocoa)]">3</span>,{" "}
-          <span className="font-medium text-[var(--cocoa)]">LOVE</span>,{" "}
-          <span className="font-medium text-[var(--cocoa)]">BABY GIRL</span> — use
-          spaces between words if you like.
-        </p>
-        <label className="mt-6 block">
-          <span className="sr-only">Lettering</span>
-          <input
-            type="text"
-            value={lettering}
-            onChange={(e) => setLettering(e.target.value)}
-            maxLength={LETTERING_MAX_LENGTH}
-            placeholder="Type your letters…"
-            className="w-full rounded-2xl border-2 border-dashed border-[var(--blush)] bg-white px-4 py-4 font-[family-name:var(--font-display)] text-2xl tracking-wide text-[var(--cocoa)] outline-none ring-[var(--coral)] placeholder:text-[var(--cocoa-muted)] focus:border-[var(--coral)] focus:ring-2 sm:text-3xl"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <span className="mt-2 block text-right text-xs text-[var(--cocoa-muted)]">
-            {lettering.length}/{LETTERING_MAX_LENGTH}
-          </span>
-        </label>
-
-        <div className="mt-6 rounded-3xl bg-gradient-to-br from-[var(--blush)] to-[#fce8e0] p-6 shadow-lg shadow-[#e8a89a]/25">
-          <p className="text-sm font-semibold uppercase tracking-wider text-[var(--cocoa-muted)]">
-            Your quote
-          </p>
-          <p
-            className={`mt-3 text-lg leading-relaxed ${
-              letteringHint.tone === "error"
-                ? "font-medium text-red-800"
-                : letteringHint.tone === "ok"
-                  ? "text-[var(--cocoa)]"
-                  : "text-[var(--cocoa-muted)]"
-            }`}
-          >
-            {letteringHint.text}
-          </p>
-          <p className="mt-4 text-sm leading-relaxed text-[var(--cocoa-muted)]">
-            We’ll review what you’ve entered and get back to you with pricing.
-            Nothing here is final until you hear from us.
-          </p>
         </div>
       </section>
 
@@ -701,20 +877,25 @@ export function QuoteQuestionnaire() {
           </p>
         )}
 
-        <button
-          type="submit"
-          disabled={
-            submitting ||
-            !letteringFormatOk ||
-            !eventDate ||
-            !addressComplete ||
-            !consent
-          }
-          className="mt-8 w-full rounded-2xl bg-[var(--coral)] py-4 text-lg font-bold text-white shadow-lg shadow-[#e07a6e]/35 transition hover:-translate-y-0.5 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {submitting ? "Sending…" : "Submit request"}
-        </button>
+        <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => setScreen(1)}
+            className="rounded-2xl border border-[var(--blush)] bg-white px-5 py-3 text-sm font-semibold text-[var(--cocoa)] transition hover:bg-[var(--cream)]"
+          >
+            Back
+          </button>
+          <button
+            type="submit"
+            disabled={submitting || !letteringFormatOk || !hasSchedule || !consent}
+            className="rounded-2xl bg-[var(--coral)] px-8 py-4 text-lg font-bold text-white shadow-lg shadow-[#e07a6e]/35 transition hover:-translate-y-0.5 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {submitting ? "Sending…" : "Submit request"}
+          </button>
+        </div>
       </section>
+        </>
+      )}
     </form>
   );
 }

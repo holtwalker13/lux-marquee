@@ -15,7 +15,7 @@ export function getAdminPasscode(): string {
   const p = process.env.ADMIN_PASSCODE?.trim();
   if (p) return p;
   if (process.env.NODE_ENV === "production") return "";
-  return "123456";
+  return "rekab";
 }
 
 export async function signAdminToken(): Promise<string> {

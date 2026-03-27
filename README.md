@@ -13,7 +13,7 @@ npm run dev
 Fill in **Google Sheets** env vars (see below). Without them, the public form returns an error when saving.
 
 - Public form: [http://localhost:3000](http://localhost:3000)
-- Admin: [http://localhost:3000/admin/login](http://localhost:3000/admin/login) — default passcode **`123456`** in development if `ADMIN_PASSCODE` is unset; set `ADMIN_JWT_SECRET` (16+ chars) for cookie signing (required in production).
+- Admin: [http://localhost:3000/admin/login](http://localhost:3000/admin/login) — default passcode **`rekab`** in development if `ADMIN_PASSCODE` is unset; set `ADMIN_JWT_SECRET` (16+ chars) for cookie signing (required in production).
 
 ## Google Sheets
 
@@ -26,6 +26,8 @@ Full reference: **[docs/GOOGLE_SHEETS.md](docs/GOOGLE_SHEETS.md)** — tab layou
    - **`Inventory`** — A = letter, B = qty from row 2 (you usually create this yourself).
    - **`Prices`** — created if missing; default glyph prices are seeded when the tab is empty.
    - **`LetterReservations`** — created if missing; rows are appended when a booking is confirmed.
+
+Optional UX upgrade: set `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` to enable Google Places autocomplete suggestions on the public form street-address field.
 
 Run `npm run sheets:headers` to force-check the SubmitRequests header row. `npm run sheets:populate` fills **Prices** (defaults if empty) and **LetterReservations** headers. `npm run test:sheets` verifies credentials.
 

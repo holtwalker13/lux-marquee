@@ -19,17 +19,20 @@ export async function POST(_req: Request, ctx: Ctx) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
 
-  if (existing.pipelineStatus !== "deposit_requested") {
-    return NextResponse.json(
-      { error: "Mark deposit paid only after a deposit has been requested." },
-      { status: 400 },
-    );
+  if (existing.pipelineStatus === "cancelled") {
+    return NextResponse.json({ error: "This request is cancelled." }, { status: 400 });
+  }
+
+  if (existing.pipelineStatus === "deposit_paid" || existing.pipelineStatus === "booked") {
+    const latest = await findSubmissionById(id);
+    if (!latest) return NextResponse.json({ error: "Not found." }, { status: 404 });
+    return NextResponse.json({ submission: sheetSubmissionToApiJson(latest) });
   }
 
   const updated = await updateSubmission(id, (p) => ({
     ...p,
     pipelineStatus: "deposit_paid",
-    depositPaidAt: new Date(),
+    depositPaidAt: p.depositPaidAt ?? new Date(),
   }));
 
   if (!updated) {
