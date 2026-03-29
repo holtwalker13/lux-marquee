@@ -52,6 +52,74 @@ const PIPELINE_ORDER: Record<string, number> = {
   cancelled: 4,
 };
 
+/** Numeric rank from Google Sheet pipeline column (for workflow UI). */
+function pipelineRankFromSheet(status: string): number {
+  switch (status) {
+    case "pending_request":
+      return 0;
+    case "deposit_requested":
+      return 1;
+    case "deposit_paid":
+      return 2;
+    case "booked":
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+function sheetStepDone(rank: number, stepIndex: number): boolean {
+  if (rank === 3 && stepIndex === 3) return true;
+  return rank > stepIndex;
+}
+
+function sheetStepCurrent(rank: number, stepIndex: number): boolean {
+  return rank === stepIndex;
+}
+
+/** Subtle pipeline pill: small tint + border (matches sheet column, not loud fills). */
+function pipelineStatusBadgeClasses(status: string): string {
+  switch (status) {
+    case "booked":
+      return "border border-emerald-200/90 bg-emerald-50/80 text-emerald-900";
+    case "deposit_paid":
+      return "border border-sky-200/90 bg-sky-50/70 text-sky-900";
+    case "deposit_requested":
+      return "border border-amber-200/90 bg-amber-50/70 text-amber-950";
+    case "pending_request":
+      return "border border-violet-200/90 bg-violet-50/70 text-violet-900";
+    case "cancelled":
+      return "border border-stone-300/80 bg-stone-100/90 text-stone-700";
+    default:
+      return "border border-[var(--blush)] bg-[var(--cream)] text-[var(--cocoa)]";
+  }
+}
+
+/** Left accent per workflow step (rest of chip stays neutral). */
+const WORKFLOW_STEP_LEFT: readonly string[] = [
+  "border-l-violet-400",
+  "border-l-amber-500",
+  "border-l-sky-500",
+  "border-l-emerald-500",
+];
+
+function sheetWorkflowStepLiClasses(
+  stepIndex: number,
+  done: boolean,
+  current: boolean,
+): string {
+  const left = WORKFLOW_STEP_LEFT[stepIndex] ?? WORKFLOW_STEP_LEFT[0];
+  const shell =
+    "rounded-md border border-[var(--blush)]/90 bg-[var(--card)] px-2 py-1.5 pl-2.5 text-[11px] leading-snug sm:px-2.5 sm:py-2 sm:text-xs border-l-[3px]";
+  if (done) {
+    return `${shell} ${left} text-[var(--cocoa)]`;
+  }
+  if (current) {
+    return `${shell} border-l-[var(--coral)] bg-[#fffaf8] font-medium text-[var(--cocoa)]`;
+  }
+  return `${shell} border-l-[var(--blush)] text-[var(--cocoa-muted)]`;
+}
+
 function downloadIcs(content: string) {
   const blob = new Blob([content], { type: "text/calendar;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -173,6 +241,59 @@ function formatTime12h(hhmm: string): string {
   h = h % 12;
   if (h === 0) h = 12;
   return `${h}:${min} ${ap}`;
+}
+
+const DEFAULT_WELCOME_SMS_TEMPLATE =
+  "Hi {{name}}! Thanks for choosing Lux Marquee Rentals. We received your request and will follow up shortly — reply here anytime.";
+
+function welcomeSmsTemplate(): string {
+  const t = process.env.NEXT_PUBLIC_ADMIN_WELCOME_SMS_TEMPLATE;
+  return typeof t === "string" && t.trim() ? t.trim() : DEFAULT_WELCOME_SMS_TEMPLATE;
+}
+
+function interpolateWelcomeSms(template: string, sub: Submission): string {
+  return template
+    .replace(/\{\{name\}\}/gi, sub.contactName.trim() || "there")
+    .replace(/\{\{eventDate\}\}/gi, formatEventDateLong(sub.eventDate))
+    .replace(/\{\{time\}\}/gi, formatTime12h(sub.eventTimeLocal));
+}
+
+/** Digits only for sms:/wa.me (US 10-digit → leading country code 1). */
+function phoneDigitsForSmsWa(raw: string | null | undefined): string | null {
+  if (!raw?.trim()) return null;
+  const d = raw.replace(/\D/g, "");
+  if (d.length === 10) return `1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return d;
+  if (d.length >= 10) return d;
+  return null;
+}
+
+function smsWelcomeHref(e164NoPlusDigits: string, body: string): string {
+  const num =
+    e164NoPlusDigits.length === 11 && e164NoPlusDigits.startsWith("1")
+      ? `+${e164NoPlusDigits}`
+      : `+${e164NoPlusDigits}`;
+  return `sms:${num}&body=${encodeURIComponent(body)}`;
+}
+
+function whatsAppWelcomeHref(e164NoPlusDigits: string, body: string): string {
+  return `https://wa.me/${e164NoPlusDigits}?text=${encodeURIComponent(body)}`;
+}
+
+function openExternalMessagingHref(href: string) {
+  if (typeof window === "undefined") return;
+  if (isMobileBrowser()) {
+    window.location.assign(href);
+    return;
+  }
+  window.open(href, "_blank", "noopener,noreferrer");
+}
+
+function businessMessengerPageUrl(): string | null {
+  const h = process.env.NEXT_PUBLIC_BUSINESS_MESSENGER_MME?.trim();
+  if (!h) return null;
+  const slug = h.replace(/^@/, "").replace(/^\//, "");
+  return slug ? `https://m.me/${encodeURIComponent(slug)}` : null;
 }
 
 function eventTypeLabel(raw: string): string {
@@ -352,24 +473,30 @@ export function AdminDashboard() {
   >({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<Record<string, BusyKey>>({});
+  const depositInFlight = useRef<Set<string>>(new Set());
   const [feedbackById, setFeedbackById] = useState<Record<string, string>>({});
+  /** When confirm-booking did not email, server returns .ics — offer a manual download (no alert/confirm). */
+  const [icsFallbackById, setIcsFallbackById] = useState<Record<string, string>>({});
   const [invFeedback, setInvFeedback] = useState<string | null>(null);
   const [availChecking, setAvailChecking] = useState(false);
   const feedbackTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const showCardFeedback = useCallback((id: string, msg: string) => {
-    const prev = feedbackTimers.current[id];
-    if (prev) clearTimeout(prev);
-    setFeedbackById((f) => ({ ...f, [id]: msg }));
-    feedbackTimers.current[id] = setTimeout(() => {
-      setFeedbackById((f) => {
-        const n = { ...f };
-        delete n[id];
-        return n;
-      });
-      delete feedbackTimers.current[id];
-    }, 2500);
-  }, []);
+  const showCardFeedback = useCallback(
+    (id: string, msg: string, durationMs = 2500) => {
+      const prev = feedbackTimers.current[id];
+      if (prev) clearTimeout(prev);
+      setFeedbackById((f) => ({ ...f, [id]: msg }));
+      feedbackTimers.current[id] = setTimeout(() => {
+        setFeedbackById((f) => {
+          const n = { ...f };
+          delete n[id];
+          return n;
+        });
+        delete feedbackTimers.current[id];
+      }, durationMs);
+    },
+    [],
+  );
 
   useEffect(() => {
     const timersRef = feedbackTimers;
@@ -388,6 +515,32 @@ export function AdminDashboard() {
         venmo: updated.venmoHandle ?? "",
       },
     }));
+  }, []);
+
+  const pageMessengerUrl = businessMessengerPageUrl();
+
+  const welcomeClientSms = useCallback((sub: Submission) => {
+    const digits = phoneDigitsForSmsWa(sub.contactPhone);
+    if (!digits) {
+      alert(
+        "No usable phone number on this request. The client must submit one on the quote form.",
+      );
+      return;
+    }
+    const body = interpolateWelcomeSms(welcomeSmsTemplate(), sub);
+    openExternalMessagingHref(smsWelcomeHref(digits, body));
+  }, []);
+
+  const welcomeClientWhatsApp = useCallback((sub: Submission) => {
+    const digits = phoneDigitsForSmsWa(sub.contactPhone);
+    if (!digits) {
+      alert(
+        "No usable phone number on this request. The client must submit one on the quote form.",
+      );
+      return;
+    }
+    const body = interpolateWelcomeSms(welcomeSmsTemplate(), sub);
+    openExternalMessagingHref(whatsAppWelcomeHref(digits, body));
   }, []);
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
@@ -576,12 +729,15 @@ export function AdminDashboard() {
 
   async function requestDeposit(sub: Submission) {
     const id = sub.id;
+    if (depositInFlight.current.has(id)) return;
+    depositInFlight.current.add(id);
     const d = drafts[id];
     const venmo = d?.venmo?.trim();
     if (!venmo) {
       alert(
         `Add the client's Venmo @handle in the field below, then try again. (We'll save your proposed $ and handle for you.)`,
       );
+      depositInFlight.current.delete(id);
       return;
     }
     setActionBusy((b) => ({ ...b, [id]: "deposit" }));
@@ -631,6 +787,7 @@ export function AdminDashboard() {
       openVenmoUrl(venmoUrl);
       showCardFeedback(id, "Deposit requested — sheet updated (Venmo opened)");
     } finally {
+      depositInFlight.current.delete(id);
       setActionBusy((b) => {
         const n = { ...b };
         delete n[id];
@@ -692,16 +849,36 @@ export function AdminDashboard() {
         showCardFeedback(id, "Already booked.");
         return;
       }
-      const msg = data.calendarEmailSent
-        ? "Booking confirmed. Calendar invites were emailed to the client and business owner."
-        : `Booking confirmed. ${data.calendarEmailNote ?? "Add calendar manually if needed."}`;
-      alert(msg);
-      if (data.ics && !data.calendarEmailSent) {
-        if (confirm("Download the .ics file to add to iPhone Calendar / Mail?")) {
-          downloadIcs(data.ics);
-        }
+      if (data.calendarEmailSent) {
+        setIcsFallbackById((f) => {
+          const n = { ...f };
+          delete n[id];
+          return n;
+        });
+        showCardFeedback(
+          id,
+          "Booked — letters held · calendar emailed to client and owner",
+          5000,
+        );
+      } else if (data.ics) {
+        setIcsFallbackById((f) => ({ ...f, [id]: data.ics }));
+        showCardFeedback(
+          id,
+          "Booked — letters held · set Resend env to email invites, or use Download calendar below",
+          6000,
+        );
+      } else {
+        setIcsFallbackById((f) => {
+          const n = { ...f };
+          delete n[id];
+          return n;
+        });
+        showCardFeedback(
+          id,
+          `Booked — letters held · ${data.calendarEmailNote ?? "No calendar file returned."}`,
+          5000,
+        );
       }
-      showCardFeedback(id, "Booked — letters held · sheet updated");
     } finally {
       setActionBusy((b) => {
         const n = { ...b };
@@ -819,7 +996,7 @@ export function AdminDashboard() {
           )}
         </button>
         {invFeedback ? (
-          <p className="mt-2 text-sm font-medium text-emerald-800">{invFeedback}</p>
+          <p className="mt-2 text-sm font-medium text-[var(--cocoa)]">{invFeedback}</p>
         ) : null}
         <details className="mt-4 rounded-2xl border border-[var(--blush)] bg-[var(--cream)]/30 p-4">
           <summary className="cursor-pointer list-none text-sm font-semibold text-[var(--cocoa)] [&::-webkit-details-marker]:hidden">
@@ -894,6 +1071,10 @@ export function AdminDashboard() {
           const busy = actionBusy[sub.id];
           const cardLocked = busy !== undefined;
           const pickupOrder = isPickupOrder(sub);
+          const sheetRank =
+            sub.pipelineStatus === "cancelled"
+              ? -1
+              : pipelineRankFromSheet(sub.pipelineStatus);
           const proposedCents = proposedCentsForSub(sub, draft?.proposed ?? "");
           const remainderCents =
             proposedCents != null ? Math.max(0, proposedCents - DEPOSIT_CENTS) : null;
@@ -962,7 +1143,7 @@ export function AdminDashboard() {
               type="button"
               onClick={() => void requestDeposit(sub)}
               disabled={cardLocked || !canRequestDeposit}
-              className="inline-flex w-full min-h-[2.75rem] items-center justify-center gap-2 rounded-lg bg-[#008cff] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex w-full min-h-[2.75rem] items-center justify-center gap-2 rounded-lg bg-[var(--cocoa)] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm transition hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
               title={`Saves total + handle to the sheet, opens Venmo for $${DEPOSIT_USD}`}
             >
               {busy === "deposit" ? (
@@ -1009,7 +1190,7 @@ export function AdminDashboard() {
           );
 
           const pricingStack = (
-            <div className="space-y-3 rounded-2xl border border-[var(--blush)] bg-[var(--cream)]/40 p-4">
+            <div className="space-y-3 rounded-lg border border-[var(--blush)]/90 bg-[var(--cream)]/30 p-3 sm:p-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <span className="text-sm font-semibold text-[var(--cocoa)]">
                   Proposed total
@@ -1032,32 +1213,32 @@ export function AdminDashboard() {
                   {depositPaid ? (
                     <>
                       <span
-                        className="flex size-7 items-center justify-center rounded-full bg-emerald-500 text-white"
+                        className="flex size-6 items-center justify-center rounded-full bg-emerald-600 text-xs text-white"
                         title="Deposit received"
                       >
                         ✓
                       </span>
-                      <span className="text-emerald-800">Received</span>
+                      <span className="text-sm text-emerald-900">Received</span>
                     </>
                   ) : depositAwaiting ? (
                     <>
                       <span
-                        className="flex size-7 items-center justify-center rounded-full border-2 border-amber-500 text-amber-700"
+                        className="flex size-6 items-center justify-center rounded-full border border-amber-400 text-amber-800"
                         title="Awaiting client payment"
                       >
                         ○
                       </span>
-                      <span className="text-amber-900">Awaiting payment</span>
+                      <span className="text-sm text-amber-950">Awaiting payment</span>
                     </>
                   ) : (
                     <>
                       <span
-                        className="flex size-7 items-center justify-center rounded-full border border-[var(--blush)] text-[var(--cocoa-muted)]"
+                        className="flex size-6 items-center justify-center rounded-full border border-[var(--blush)] text-[var(--cocoa-muted)]"
                         title="Deposit not requested"
                       >
                         —
                       </span>
-                      <span className="text-[var(--cocoa-muted)]">Not requested</span>
+                      <span className="text-sm text-[var(--cocoa-muted)]">Not requested</span>
                     </>
                   )}
                 </span>
@@ -1083,47 +1264,106 @@ export function AdminDashboard() {
             </div>
           );
 
-          const actionGrid = (
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => void markDepositPaid(sub.id)}
-                disabled={cardLocked || !canMarkPaid}
-                className="inline-flex min-h-[2.75rem] items-center justify-center gap-1.5 rounded-xl bg-[var(--coral)] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
-                title="Manual step when you have the deposit in Venmo"
+          const markPaidDoneInSheet = sub.pipelineStatus === "deposit_paid";
+          const bookingDoneInSheet = sub.pipelineStatus === "booked";
+
+          const actionGrid =
+            bookingDoneInSheet ? (
+              <div
+                className="flex min-h-11 items-center gap-2.5 rounded-lg border border-emerald-200/90 bg-emerald-50/70 px-3 py-2.5 text-left text-sm font-semibold text-emerald-950"
+                role="status"
               >
-                {busy === "paid" ? (
-                  <>
-                    <Spinner className="text-white" />
-                    <span className="animate-pulse">Updating…</span>
-                  </>
-                ) : (
-                  "Mark as paid"
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => void confirmBooking(sub.id)}
-                disabled={cardLocked || !canConfirmBooking}
-                className="inline-flex min-h-[2.75rem] items-center justify-center gap-1.5 rounded-xl bg-[var(--coral)] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
-                title="Locks letters ±12h; emails .ics if Resend is configured. Confirm only after you are satisfied deposit is handled."
-              >
-                {busy === "book" ? (
-                  <>
-                    <Spinner className="text-white" />
-                    <span className="animate-pulse">Confirming…</span>
-                  </>
-                ) : (
-                  "Confirm booking"
-                )}
-              </button>
-            </div>
-          );
+                <span
+                  className="flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs text-white"
+                  aria-hidden
+                >
+                  ✓
+                </span>
+                <span className="min-w-0 leading-snug">
+                  Booked in sheet{" "}
+                  <span className="font-mono text-[11px] font-medium uppercase tracking-wide text-emerald-900">
+                    booked
+                  </span>
+                </span>
+              </div>
+            ) : markPaidDoneInSheet ? (
+              <div className="space-y-2">
+                <div
+                  className="flex min-h-11 items-center gap-2.5 rounded-lg border border-emerald-200/90 bg-emerald-50/70 px-3 py-2.5 text-emerald-950"
+                  role="status"
+                  title="Pipeline status from your SubmitRequests sheet"
+                >
+                  <span
+                    className="flex size-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs text-white"
+                    aria-hidden
+                  >
+                    ✓
+                  </span>
+                  <div className="min-w-0 text-left text-xs font-medium leading-snug sm:text-sm">
+                    <span className="block text-emerald-950">Deposit paid — recorded</span>
+                    <span className="mt-0.5 block font-mono text-[10px] font-normal uppercase tracking-wide text-emerald-800/85 sm:text-[11px]">
+                      Sheet: deposit_paid
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void confirmBooking(sub.id)}
+                  disabled={cardLocked || !canConfirmBooking}
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-[var(--coral)] px-3 py-2.5 text-center text-sm font-bold text-white shadow-sm transition hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Locks letters ±12h; emails .ics via Resend when env is set, else use Download calendar on the card. Confirm only when you are satisfied deposit is handled."
+                >
+                  {busy === "book" ? (
+                    <>
+                      <Spinner className="text-white" />
+                      <span className="animate-pulse">Confirming…</span>
+                    </>
+                  ) : (
+                    "Confirm booking"
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => void markDepositPaid(sub.id)}
+                  disabled={cardLocked || !canMarkPaid}
+                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-[var(--blush)] bg-white px-2 py-2.5 text-center text-xs font-semibold leading-snug text-[var(--cocoa)] transition hover:bg-[var(--cream)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+                  title="Manual step when you have the deposit in Venmo"
+                >
+                  {busy === "paid" ? (
+                    <>
+                      <Spinner className="text-[var(--cocoa)]" />
+                      <span className="animate-pulse">Updating…</span>
+                    </>
+                  ) : (
+                    "Mark as paid"
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void confirmBooking(sub.id)}
+                  disabled={cardLocked || !canConfirmBooking}
+                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-[var(--coral)] px-2 py-2.5 text-center text-xs font-bold leading-snug text-white shadow-sm transition hover:brightness-105 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+                  title="You can confirm before marking paid if you choose; locks letters ±12h when used."
+                >
+                  {busy === "book" ? (
+                    <>
+                      <Spinner className="text-[var(--coral)]" />
+                      <span className="animate-pulse">Confirming…</span>
+                    </>
+                  ) : (
+                    "Confirm booking"
+                  )}
+                </button>
+              </div>
+            );
 
           return (
             <article
               key={sub.id}
-              className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-3 shadow-sm sm:p-4"
+              className="rounded-xl border border-[var(--blush)]/90 bg-[var(--card)] p-3 sm:p-4"
             >
               <div className="flex gap-2 sm:gap-3">
                 <div className="min-w-0 flex-1 space-y-1.5">
@@ -1133,7 +1373,7 @@ export function AdminDashboard() {
                     </h3>
                     <div className="flex items-center gap-2">
                       {pickupOrder ? (
-                        <span className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold uppercase leading-none text-indigo-900 sm:text-xs">
+                        <span className="shrink-0 rounded-md border border-[var(--blush)] bg-[var(--cream)] px-2 py-0.5 text-[10px] font-semibold uppercase leading-none text-[var(--cocoa-muted)] sm:text-xs">
                           Pickup
                         </span>
                       ) : null}
@@ -1141,11 +1381,7 @@ export function AdminDashboard() {
                         {formatTimeAgo(sub.createdAt)}
                       </span>
                       <span
-                        className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase leading-none sm:text-xs ${
-                          sub.pipelineStatus === "booked"
-                            ? "bg-emerald-100 text-emerald-900"
-                            : "bg-[var(--blush)] text-[var(--cocoa)]"
-                        }`}
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase leading-none sm:text-xs ${pipelineStatusBadgeClasses(sub.pipelineStatus)}`}
                       >
                         {sub.pipelineStatus.replace(/_/g, " ")}
                       </span>
@@ -1157,6 +1393,53 @@ export function AdminDashboard() {
                       <span className="text-[var(--cocoa)]"> · {sub.contactPhone}</span>
                     ) : null}
                   </p>
+                  {sub.pipelineStatus !== "cancelled" &&
+                  phoneDigitsForSmsWa(sub.contactPhone) ? (
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => welcomeClientSms(sub)}
+                          className="inline-flex min-h-9 items-center justify-center rounded-lg border border-[var(--cocoa)] bg-[var(--cocoa)] px-3 py-1.5 text-center text-[11px] font-semibold text-white transition hover:brightness-110 active:scale-[0.99] sm:text-xs"
+                          title="Opens SMS/Messages with a welcome note (sends from your phone)"
+                        >
+                          Text welcome
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => welcomeClientWhatsApp(sub)}
+                          className="inline-flex min-h-9 items-center justify-center rounded-lg border border-[var(--blush)] bg-white px-3 py-1.5 text-center text-[11px] font-semibold text-[var(--cocoa)] transition hover:bg-[var(--cream)] active:scale-[0.99] sm:text-xs"
+                          title="Opens WhatsApp with the same prefilled message"
+                        >
+                          WhatsApp welcome
+                        </button>
+                        {pageMessengerUrl ? (
+                          <a
+                            href={pageMessengerUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex min-h-9 items-center justify-center rounded-lg border border-[var(--blush)] bg-white px-3 py-1.5 text-center text-[11px] font-semibold text-[var(--cocoa)] transition hover:bg-[var(--cream)] sm:text-xs"
+                            title="Opens your Facebook Page Messenger inbox (not the client’s number)"
+                          >
+                            Page Messenger
+                          </a>
+                        ) : null}
+                      </div>
+                      <p className="text-[10px] leading-snug text-[var(--cocoa-muted)]">
+                        Text/WhatsApp use the number on this request and open{" "}
+                        <strong className="font-semibold text-[var(--cocoa)]">your</strong> phone’s
+                        app with a prefilled message. Facebook Messenger cannot start a chat from a
+                        phone number via a link—use Page Messenger for your business inbox, or text
+                        the client.
+                      </p>
+                    </div>
+                  ) : sub.pipelineStatus !== "cancelled" ? (
+                    <p className="text-[10px] text-[var(--cocoa-muted)]">
+                      Add a phone on the quote form to enable{" "}
+                      <span className="font-medium text-[var(--cocoa)]">Text welcome</span> /{" "}
+                      WhatsApp.
+                    </p>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-snug text-[var(--cocoa)] sm:text-xs">
                     <span className="font-medium capitalize text-[var(--cocoa-muted)]">
                       {eventTypeLabel(sub.eventType)}
@@ -1165,19 +1448,19 @@ export function AdminDashboard() {
                       ·
                     </span>
                     <span className="inline-flex items-center gap-0.5">
-                      <IconCalendar className="size-3.5 shrink-0 text-[var(--coral)]" />
+                      <IconCalendar className="size-3.5 shrink-0 text-[var(--cocoa-muted)]" />
                       {formatEventDateLong(sub.eventDate)}
                     </span>
                     <span className="text-[var(--blush)]" aria-hidden>
                       ·
                     </span>
                     <span className="inline-flex items-center gap-0.5">
-                      <IconClock className="size-3.5 shrink-0 text-[var(--coral)]" />
+                      <IconClock className="size-3.5 shrink-0 text-[var(--cocoa-muted)]" />
                       {formatTime12h(sub.eventTimeLocal)}
                     </span>
                   </div>
                   <p className="flex items-start gap-1 text-[11px] leading-snug text-[var(--cocoa-muted)] sm:text-xs">
-                    <IconMapPin className="mt-0.5 size-3.5 shrink-0 text-[var(--coral)]" />
+                    <IconMapPin className="mt-0.5 size-3.5 shrink-0 text-[var(--cocoa-muted)]" />
                     <span className="min-w-0">{compactLocationLine(sub)}</span>
                   </p>
                 </div>
@@ -1185,11 +1468,11 @@ export function AdminDashboard() {
 
               <div className="mt-2.5 border-t border-[var(--blush)]/70 pt-2.5">
                 <div className="flex flex-wrap items-end gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--cocoa-muted)]">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--cocoa-muted)]">
                     Letters
                   </span>
                   <div
-                    className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-xl border-2 border-[var(--coral)] bg-gradient-to-br from-[#fff8f6] to-[var(--cream)] px-2 py-1.5 shadow-inner shadow-[#e8d5cf]/50"
+                    className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg border border-[var(--blush)] bg-[var(--cream)]/50 px-2 py-1.5"
                     aria-label={`Lettering: ${sub.letteringRaw || "none"}`}
                   >
                     <LetteringPerLetter text={sub.letteringRaw} compact />
@@ -1197,8 +1480,8 @@ export function AdminDashboard() {
                 </div>
               </div>
 
-              <div className="mt-3 rounded-xl border-2 border-[var(--coral)]/35 bg-gradient-to-br from-[#fffaf8] to-[var(--cream)]/90 p-3 sm:p-3.5">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--coral)]">
+              <div className="mt-3 rounded-lg border border-[var(--blush)]/90 bg-[var(--cream)]/35 p-3 sm:p-3.5">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--cocoa-muted)]">
                   Next step
                 </p>
                 <div className="mt-2 space-y-2.5">
@@ -1224,9 +1507,15 @@ export function AdminDashboard() {
                   )}
                   {sub.pipelineStatus === "deposit_paid" && (
                     <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
-                      Deposit marked paid on your side. Use{" "}
-                      <span className="font-semibold text-[var(--cocoa)]">Quick actions</span>{" "}
-                      to confirm booking when you are ready (writes holds + official sheet state).
+                      Sheet status is{" "}
+                      <span className="font-mono font-semibold text-[var(--cocoa)]">
+                        deposit_paid
+                      </span>
+                      . When you are ready, use{" "}
+                      <span className="font-semibold text-[var(--cocoa)]">Confirm booking</span>{" "}
+                      below (writes letter holds + sets{" "}
+                      <span className="font-mono text-[11px] text-[var(--cocoa)]">booked</span> in
+                      the sheet).
                     </p>
                   )}
                   {sub.pipelineStatus === "booked" && (
@@ -1234,13 +1523,43 @@ export function AdminDashboard() {
                       <p className="text-xs leading-snug text-[var(--cocoa-muted)]">
                         Booked — remainder via Venmo anytime.
                       </p>
+                      {icsFallbackById[sub.id] ? (
+                        <div className="space-y-2 rounded-lg border border-[var(--blush)] bg-[var(--card)] p-3">
+                          <p className="text-[11px] leading-snug text-[var(--cocoa-muted)]">
+                            Calendar invite was not emailed automatically. Add{" "}
+                            <code className="rounded bg-white/80 px-1 text-[10px]">
+                              RESEND_API_KEY
+                            </code>
+                            ,{" "}
+                            <code className="rounded bg-white/80 px-1 text-[10px]">
+                              RESEND_FROM_EMAIL
+                            </code>
+                            , and{" "}
+                            <code className="rounded bg-white/80 px-1 text-[10px]">
+                              BUSINESS_OWNER_EMAIL
+                            </code>{" "}
+                            to <code className="rounded bg-white/80 px-1 text-[10px]">.env</code>{" "}
+                            (restart <code className="rounded bg-white/80 px-1 text-[10px]">npm run dev</code>
+                            ) or Netlify env, then redeploy. Meanwhile you can download the same{" "}
+                            <code className="rounded bg-white/80 px-1 text-[10px]">.ics</code> file
+                            the emails would attach.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => downloadIcs(icsFallbackById[sub.id])}
+                            className="w-full rounded-lg bg-[var(--cocoa)] px-3 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 active:scale-[0.99] sm:w-auto"
+                          >
+                            Download calendar (.ics)
+                          </button>
+                        </div>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => openVenmoRemainder(sub)}
                         disabled={
                           cardLocked || remainderCents == null || remainderCents <= 0
                         }
-                        className="w-full rounded-lg border-2 border-[var(--coral)] bg-white px-3 py-2.5 text-sm font-bold text-[var(--coral)] transition hover:bg-[#fff8f6] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+                        className="w-full rounded-lg border border-[var(--blush)] bg-white px-3 py-2.5 text-sm font-semibold text-[var(--cocoa)] transition hover:bg-[var(--cream)] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
                       >
                         {remainderCents != null && remainderCents > 0
                           ? `Send remainder ($${formatMoneyCents(remainderCents)})`
@@ -1256,12 +1575,12 @@ export function AdminDashboard() {
                 </div>
               </div>
 
-              <div className="mt-2.5 space-y-2.5 rounded-xl border border-[var(--blush)] bg-[var(--cream)]/30 p-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--cocoa-muted)]">
+              <div className="mt-2.5 space-y-2 rounded-lg border border-[var(--blush)]/90 bg-[var(--cream)]/25 p-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--cocoa-muted)]">
                   Quick actions
                 </p>
                 {feedbackById[sub.id] ? (
-                  <p className="text-center text-[11px] font-medium text-emerald-800 animate-pulse">
+                  <p className="text-center text-[11px] font-medium text-[var(--cocoa)] animate-pulse">
                     {feedbackById[sub.id]}
                   </p>
                 ) : null}
@@ -1274,7 +1593,7 @@ export function AdminDashboard() {
                     remainderCents == null ||
                     remainderCents <= 0
                   }
-                  className="w-full rounded-xl bg-[#008cff] px-3 py-2.5 text-sm font-bold text-white shadow-sm shadow-[#008cff]/20 transition hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+                  className="w-full rounded-lg border border-[var(--cocoa)] bg-[var(--cocoa)] px-3 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
                   title="Opens Venmo for the balance after the deposit"
                 >
                   {remainderCents != null && remainderCents > 0
@@ -1284,8 +1603,8 @@ export function AdminDashboard() {
                 {actionGrid}
               </div>
 
-              <details className="group mt-3 overflow-hidden rounded-xl border border-[var(--blush)] bg-[var(--cream)]/25">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-xs font-semibold text-[var(--cocoa)] sm:text-sm [&::-webkit-details-marker]:hidden">
+              <details className="group mt-3 overflow-hidden rounded-lg border border-[var(--blush)]/90 bg-[var(--card)]">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-xs font-medium text-[var(--cocoa)] sm:text-sm [&::-webkit-details-marker]:hidden">
                   <span>Event details, pricing &amp; all actions</span>
                   <ChevronDetails className="shrink-0 text-[var(--cocoa-muted)] transition-transform duration-200 group-open:rotate-180" />
                 </summary>
@@ -1296,17 +1615,17 @@ export function AdminDashboard() {
                   </p>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa)]">
                     <span className="inline-flex items-center gap-1.5">
-                      <IconCalendar className="shrink-0 text-[var(--coral)]" />
+                      <IconCalendar className="shrink-0 text-[var(--cocoa-muted)]" />
                       {formatEventDateLong(sub.eventDate)}
                     </span>
                     <span className="text-[var(--cocoa-muted)]">·</span>
                     <span className="inline-flex items-center gap-1.5">
-                      <IconClock className="shrink-0 text-[var(--coral)]" />
+                      <IconClock className="shrink-0 text-[var(--cocoa-muted)]" />
                       {formatTime12h(sub.eventTimeLocal)}
                     </span>
                   </div>
                   <p className="flex items-start gap-2 text-sm text-[var(--cocoa-muted)]">
-                    <IconMapPin className="mt-0.5 shrink-0 text-[var(--coral)]" />
+                    <IconMapPin className="mt-0.5 shrink-0 text-[var(--cocoa-muted)]" />
                     <span>
                       {pickupOrder ? (
                         "Local pickup order"
@@ -1322,44 +1641,45 @@ export function AdminDashboard() {
                     </span>
                   </p>
 
-                  <ol className="grid gap-2 text-xs text-[var(--cocoa-muted)] sm:grid-cols-4">
-                    <li
-                      className={`rounded-lg border px-2 py-2 ${
-                        sub.pipelineStatus === "pending_request"
-                          ? "border-[var(--coral)] bg-[#fff5f3]"
-                          : "border-transparent bg-[var(--cream)]"
-                      }`}
-                    >
-                      <span className="font-bold text-[var(--cocoa)]">1.</span> Quote + Venmo
-                    </li>
-                    <li
-                      className={`rounded-lg border px-2 py-2 ${
-                        sub.pipelineStatus === "deposit_requested"
-                          ? "border-[var(--coral)] bg-[#fff5f3]"
-                          : "border-transparent bg-[var(--cream)]"
-                      }`}
-                    >
-                      <span className="font-bold text-[var(--cocoa)]">2.</span> ${DEPOSIT_USD}{" "}
-                      link sent
-                    </li>
-                    <li
-                      className={`rounded-lg border px-2 py-2 ${
-                        sub.pipelineStatus === "deposit_paid"
-                          ? "border-[var(--coral)] bg-[#fff5f3]"
-                          : "border-transparent bg-[var(--cream)]"
-                      }`}
-                    >
-                      <span className="font-bold text-[var(--cocoa)]">3.</span> Deposit received
-                    </li>
-                    <li
-                      className={`rounded-lg border px-2 py-2 ${
-                        sub.pipelineStatus === "booked"
-                          ? "border-emerald-400 bg-emerald-50"
-                          : "border-transparent bg-[var(--cream)]"
-                      }`}
-                    >
-                      <span className="font-bold text-[var(--cocoa)]">4.</span> Booked + holds
-                    </li>
+                  <ol className="grid gap-1.5 text-xs sm:grid-cols-4 sm:gap-2">
+                    {(
+                      [
+                        { step: 0 as const, n: "1.", text: "Quote + Venmo" },
+                        {
+                          step: 1 as const,
+                          n: "2.",
+                          text: `$${DEPOSIT_USD} link sent`,
+                        },
+                        { step: 2 as const, n: "3.", text: "Deposit received" },
+                        { step: 3 as const, n: "4.", text: "Booked + holds" },
+                      ] as const
+                    ).map(({ step, n, text }) => {
+                      if (sheetRank < 0) {
+                        return (
+                          <li
+                            key={step}
+                            className="rounded-md border border-stone-200/90 bg-stone-50/90 px-2 py-1.5 text-[11px] text-stone-600 sm:py-2 sm:text-xs"
+                          >
+                            <span className="font-semibold text-stone-700">{n}</span> {text}
+                          </li>
+                        );
+                      }
+                      const done = sheetStepDone(sheetRank, step);
+                      const current = sheetStepCurrent(sheetRank, step);
+                      return (
+                        <li
+                          key={step}
+                          className={sheetWorkflowStepLiClasses(step, done, current)}
+                          title="Colors match pipeline stages on SubmitRequests sheet"
+                        >
+                          <span className="font-bold">
+                            {done ? "✓ " : ""}
+                            {n}
+                          </span>{" "}
+                          {text}
+                        </li>
+                      );
+                    })}
                   </ol>
 
                   <div>
@@ -1381,7 +1701,7 @@ export function AdminDashboard() {
                   </p>
 
                   {sub.pipelineStatus === "booked" && (
-                    <p className="text-xs text-emerald-800">
+                    <p className="text-xs text-[var(--cocoa-muted)]">
                       Official booking: letters in this phrase are reserved for the event window
                       (±12h). Open the Availability check above to verify future requests.
                     </p>
@@ -1403,10 +1723,11 @@ export function AdminDashboard() {
           <strong>Confirm booking</strong>. <strong>Send remainder</strong> uses proposed
           total − ${DEPOSIT_USD} and stays available <strong>any time</strong> (even after
           booking) until you cancel the job. (4) Confirm booking emails a calendar{" "}
-          <strong>.ics</strong> to the client and <strong>BUSINESS_OWNER_EMAIL</strong>{" "}
-          (set <strong>Resend</strong> in
-          <code className="mx-1 rounded bg-[var(--cream)] px-1 text-xs">.env</code>
-          ), and <strong>locks letters</strong> for this event: each A–Z in the phrase is
+          <strong>.ics</strong> to the client and <strong>BUSINESS_OWNER_EMAIL</strong> when{" "}
+          <strong>Resend</strong> env vars are set (see
+          <code className="mx-1 rounded bg-[var(--cream)] px-1 text-xs">.env.example</code>
+          ); otherwise use <strong>Download calendar (.ics)</strong> on the card. Confirm also{" "}
+          <strong>locks letters</strong> for this event: each A–Z in the phrase is
           reserved for <strong>12 hours before through 12 hours after</strong> the event
           time (overlap checks; sheet quantities are not reduced).
         </p>

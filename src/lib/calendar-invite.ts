@@ -75,7 +75,7 @@ export async function sendBookingInviteEmail(params: {
     return {
       sent: false,
       reason:
-        "Set RESEND_API_KEY, RESEND_FROM_EMAIL, and BUSINESS_OWNER_EMAIL to email .ics invites automatically.",
+        "Calendar email is off. Add RESEND_API_KEY, RESEND_FROM_EMAIL, and BUSINESS_OWNER_EMAIL to .env (or Netlify env), restart the server, then confirm again on a test job — or use Download calendar on the card.",
       ics: icsBlob?.content,
     };
   }
@@ -118,9 +118,14 @@ export async function sendBookingInviteEmail(params: {
   if (toClient.error || toOwner.error) {
     return {
       sent: false,
-      reason: [toClient.error?.message, toOwner.error?.message]
+      reason: [
+        "Resend could not send:",
+        toClient.error?.message,
+        toOwner.error?.message,
+      ]
         .filter(Boolean)
         .join(" "),
+      ics: icsBlob.content,
     };
   }
 
