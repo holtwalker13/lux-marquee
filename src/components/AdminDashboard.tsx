@@ -861,7 +861,8 @@ export function AdminDashboard() {
           5000,
         );
       } else if (data.ics) {
-        setIcsFallbackById((f) => ({ ...f, [id]: data.ics }));
+        const icsContent = data.ics;
+        setIcsFallbackById((f) => ({ ...f, [id]: icsContent }));
         showCardFeedback(
           id,
           "Booked — letters held · set Resend env to email invites, or use Download calendar below",
