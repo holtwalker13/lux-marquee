@@ -1,15 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   BadgeCheck,
   Calendar,
+  CalendarDays,
+  Check,
   CheckCircle2,
   Clock,
+  ExternalLink,
+  List,
   Mail,
   MapPin,
-  Phone,
+  MessageSquare,
+  PanelsTopLeft,
+  Pencil,
   Trash2,
 } from "lucide-react";
 import { buildVenmoChargeUrl, depositAmountDollars } from "@/lib/venmo-deposit";
@@ -42,12 +48,21 @@ type Submission = {
 };
 type InvLetter = { letter: string; totalQuantity: number };
 type BusyKey = "save" | "deposit" | "paid" | "book" | "task";
-type ActiveTab = "submitted" | "bookings";
+type ActiveTab = "submitted" | "bookings" | "archive";
 type RequestStage = "new_inquiry" | "quote_sent" | "deposit_requested" | "deposit_received";
 type BookingTaskKey = "calendarCreated" | "welcomeSent" | "contractSent" | "balancePaid";
 type BookingTasks = Record<BookingTaskKey, boolean>;
 type CancelIntent = { id: string; label: string } | null;
 type ConfirmBookingIntent = { id: string; clientName: string } | null;
+type ConfirmBookingSuccess = {
+  id: string;
+  clientName: string;
+  eventDate: string;
+  eventTime: string;
+  location: string;
+  lettering: string;
+  googleCalendarUrl: string;
+} | null;
 
 const DEPOSIT_USD = depositAmountDollars();
 const DEPOSIT_CENTS = DEPOSIT_USD * 100;
@@ -65,8 +80,21 @@ const PIPELINE_ORDER: Record<string, number> = {
   cancelled: 4,
 };
 
-function Spinner({ className }: { className?: string }) {
-  return <span className={`inline-block size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent ${className ?? ""}`} />;
+function LoadingPulse({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center gap-2 text-sm font-medium">
+      <span className="relative inline-flex items-center">
+        <Calendar className="size-4 text-white/95" aria-hidden />
+        <span className="absolute inset-0 -z-10 animate-pulse rounded-full bg-white/20" />
+      </span>
+      <span>{label}</span>
+      <span className="inline-flex gap-1">
+        <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:0ms]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:120ms]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:240ms]" />
+      </span>
+    </span>
+  );
 }
 
 function parseDraftDollarsToCents(s: string): number | null {
@@ -90,22 +118,6 @@ function formatEventDateLong(iso: string): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function formatTimeAgo(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const diffMs = Date.now() - d.getTime();
-  if (diffMs < 0) return "just now";
-  const minutes = Math.floor(diffMs / (1000 * 60));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min${minutes === 1 ? "" : "s"} ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 14) return `${days} day${days === 1 ? "" : "s"} ago`;
-  const weeks = Math.floor(days / 7);
-  return `${weeks} week${weeks === 1 ? "" : "s"} ago`;
 }
 
 function formatTime12h(hhmm: string): string {
@@ -148,6 +160,14 @@ function phoneDigitsForSmsWa(raw: string | null | undefined): string | null {
   return null;
 }
 
+function smsDraftUrl(raw: string | null | undefined, contactName?: string): string | null {
+  const digits = phoneDigitsForSmsWa(raw);
+  if (!digits) return null;
+  const firstName = splitContactName(contactName ?? "").first;
+  const body = encodeURIComponent(`Hey ${firstName}`);
+  return `sms:+${digits}&body=${body}`;
+}
+
 function centsToDollars(cents: number | null): string {
   if (cents == null) return "";
   return (cents / 100).toFixed(2);
@@ -172,6 +192,29 @@ function openVenmoUrl(url: string) {
 function compactLocationLine(sub: Submission): string {
   const citySt = [sub.eventCity, sub.eventState].filter(Boolean).join(", ");
   return [citySt, sub.eventAddressLine1].filter(Boolean).join(" · ");
+}
+
+function toGoogleCalendarDate(iso: string): string {
+  return iso.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function buildGoogleCalendarUrl(sub: Submission): string {
+  const fallbackStart = new Date(`${sub.eventDate.slice(0, 10)}T12:00:00.000Z`);
+  const start = sub.eventStartAt ? new Date(sub.eventStartAt) : fallbackStart;
+  const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  const title = `Lux Marquee Booking: ${sub.contactName}`;
+  const details = `Letters: ${sub.letteringRaw || "N/A"}\nClient: ${sub.contactName}\nPhone: ${sub.contactPhone ?? "N/A"}\nEmail: ${sub.contactEmail}`;
+  const location = [sub.eventAddressLine1, sub.eventCity, sub.eventState, sub.eventPostalCode]
+    .filter(Boolean)
+    .join(" ");
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: title,
+    dates: `${toGoogleCalendarDate(start.toISOString())}/${toGoogleCalendarDate(end.toISOString())}`,
+    details,
+    location,
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 function sortedSubmissions(list: Submission[]): Submission[] {
   return [...list].sort((a, b) => {
@@ -199,11 +242,49 @@ function parseBookingTasks(metadataRaw: string | null): BookingTasks {
   }
 }
 function requestStage(sub: Submission, draftProposed: string): RequestStage | null {
-  if (sub.pipelineStatus === "booked" || sub.pipelineStatus === "cancelled") return null;
+  if (
+    sub.pipelineStatus === "booked" ||
+    sub.pipelineStatus === "cancelled" ||
+    sub.pipelineStatus === "archived" ||
+    sub.pipelineStatus === "completed"
+  ) {
+    return null;
+  }
   if (sub.pipelineStatus === "deposit_paid") return "deposit_received";
   if (sub.pipelineStatus === "deposit_requested") return "deposit_requested";
   const proposed = proposedCentsForSub(sub, draftProposed);
   return proposed && proposed > 0 ? "quote_sent" : "new_inquiry";
+}
+
+function eventStartForSubmission(sub: Submission): Date | null {
+  if (sub.eventStartAt) {
+    const d = new Date(sub.eventStartAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  const fallback = new Date(sub.eventDate);
+  if (!Number.isNaN(fallback.getTime())) return fallback;
+  return null;
+}
+
+function isFullyPaid(sub: Submission): boolean {
+  const tasks = parseBookingTasks(sub.metadata);
+  const depositPaid =
+    sub.pipelineStatus === "booked" ||
+    sub.pipelineStatus === "deposit_paid" ||
+    sub.depositPaidAt != null;
+  const proposed = sub.proposedAmountCents;
+  const balanceClear =
+    proposed == null ? tasks.balancePaid : Math.max(0, proposed - DEPOSIT_CENTS) <= 0 || tasks.balancePaid;
+  return depositPaid && balanceClear;
+}
+
+function shouldAutoArchiveBooking(sub: Submission): boolean {
+  if (sub.pipelineStatus !== "booked") return false;
+  if (!isFullyPaid(sub)) return false;
+  const start = eventStartForSubmission(sub);
+  if (!start) return false;
+  const elapsedMs = Date.now() - start.getTime();
+  return elapsedMs >= 48 * 60 * 60 * 1000;
 }
 
 function depositReceivedForRequest(sub: Submission, stage: RequestStage): boolean {
@@ -256,11 +337,13 @@ function DashboardTabs({
   activeTab,
   submittedCount,
   bookingCount,
+  archiveCount,
   onChange,
 }: {
   activeTab: ActiveTab;
   submittedCount: number;
   bookingCount: number;
+  archiveCount: number;
   onChange: (tab: ActiveTab) => void;
 }) {
   return (
@@ -270,38 +353,125 @@ function DashboardTabs({
         onClick={() => onChange("submitted")}
         className={`rounded-lg px-3 py-2 text-sm font-semibold ${activeTab === "submitted" ? "bg-[var(--cocoa)] text-white" : "text-[var(--cocoa)]"}`}
       >
-        Submitted Requests ({submittedCount})
+        <span className="inline-flex items-center gap-1.5">
+          <span>Requests</span>
+          <span
+            className={`font-mono tabular-nums ${
+              activeTab === "submitted"
+                ? "rounded-full bg-white/20 px-1.5 py-0.5 text-[var(--cream)]/90"
+                : "rounded-full bg-[var(--coral)]/10 px-1.5 py-0.5 text-[var(--coral)]"
+            }`}
+          >
+            {submittedCount}
+          </span>
+        </span>
       </button>
       <button
         type="button"
         onClick={() => onChange("bookings")}
         className={`rounded-lg px-3 py-2 text-sm font-semibold ${activeTab === "bookings" ? "bg-[var(--cocoa)] text-white" : "text-[var(--cocoa)]"}`}
       >
-        Bookings ({bookingCount})
+        <span className="inline-flex items-center gap-1.5">
+          <span>Bookings</span>
+          <span
+            className={`font-mono tabular-nums ${
+              activeTab === "bookings"
+                ? "rounded-full bg-white/20 px-1.5 py-0.5 text-[var(--cream)]/90"
+                : "rounded-full bg-[var(--coral)]/10 px-1.5 py-0.5 text-[var(--coral)]"
+            }`}
+          >
+            {bookingCount}
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("archive")}
+        className={`rounded-lg px-3 py-2 text-sm font-semibold ${activeTab === "archive" ? "bg-[var(--cocoa)] text-white" : "text-[var(--cocoa)]"}`}
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <span>Archive</span>
+          <span
+            className={`font-mono tabular-nums ${
+              activeTab === "archive"
+                ? "rounded-full bg-white/20 px-1.5 py-0.5 text-[var(--cream)]/90"
+                : "rounded-full bg-[var(--coral)]/10 px-1.5 py-0.5 text-[var(--coral)]"
+            }`}
+          >
+            {archiveCount}
+          </span>
+        </span>
       </button>
     </div>
   );
 }
 
-function PaymentSummary({
+function SubmittedPaymentSummary({
   proposedCents,
   stage,
   sub,
+  proposedDraft,
+  venmoDraft,
+  isEditingProposed,
+  onProposedDraftChange,
+  onToggleEditProposed,
+  onSaveProposed,
+  onVenmoDraftChange,
+  onSaveVenmo,
+  disabled,
 }: {
   proposedCents: number | null;
   stage: RequestStage;
   sub: Submission;
+  proposedDraft: string;
+  venmoDraft: string;
+  isEditingProposed: boolean;
+  onProposedDraftChange: (value: string) => void;
+  onToggleEditProposed: () => void;
+  onSaveProposed: () => void;
+  onVenmoDraftChange: (value: string) => void;
+  onSaveVenmo: () => void;
+  disabled: boolean;
 }) {
   const received = depositReceivedForRequest(sub, stage);
   return (
-    <div className="grid gap-2 sm:grid-cols-3">
+    <div className="grid gap-2 sm:grid-cols-4">
       <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
         <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
           Proposed total
         </p>
-        <p className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
-          {proposedCents != null ? `$${formatMoneyCents(proposedCents)}` : "—"}
-        </p>
+        <div className="mt-0.5 flex items-center gap-1.5">
+          {isEditingProposed ? (
+            <input
+              value={proposedDraft}
+              onChange={(e) => onProposedDraftChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onSaveProposed();
+                }
+              }}
+              className="w-full rounded-md border border-[var(--blush)] bg-white px-2 py-1 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]"
+              placeholder="0.00"
+              disabled={disabled}
+              autoFocus
+            />
+          ) : (
+            <p className="min-h-8 pt-1 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
+              {proposedCents != null ? `$${formatMoneyCents(proposedCents)}` : "—"}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={isEditingProposed ? onSaveProposed : onToggleEditProposed}
+            disabled={disabled}
+            className="rounded-md border border-[var(--blush)] p-1 text-[var(--cocoa)] disabled:opacity-50"
+            aria-label={isEditingProposed ? "Save proposed total" : "Edit proposed total"}
+            title={isEditingProposed ? "Save proposed total" : "Edit proposed total"}
+          >
+            {isEditingProposed ? <Check className="size-4" aria-hidden /> : <Pencil className="size-4" aria-hidden />}
+          </button>
+        </div>
       </div>
       <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
         <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
@@ -310,13 +480,114 @@ function PaymentSummary({
         <div className="mt-0.5 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--cocoa)]">
           {received ? (
             <>
-              <BadgeCheck className="size-4 text-emerald-600" aria-hidden />
-              <span className="text-emerald-800">Received</span>
+              <BadgeCheck className="size-4 text-[var(--coral)]" aria-hidden />
+              <span className="text-[var(--cocoa)]">Received</span>
             </>
           ) : stage === "deposit_requested" ? (
             <span className="text-amber-950">Awaiting</span>
           ) : (
             <span className="text-[var(--cocoa-muted)]">Not requested</span>
+          )}
+        </div>
+      </div>
+      <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+          Balance
+        </p>
+        <p className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
+          {proposedCents != null ? `$${formatMoneyCents(Math.max(0, proposedCents - DEPOSIT_CENTS))}` : "—"}
+        </p>
+      </div>
+      <label className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+        Venmo @
+        <input
+          value={venmoDraft}
+          onChange={(e) => onVenmoDraftChange(e.target.value)}
+          onBlur={onSaveVenmo}
+          className="mt-1 w-full rounded-md border border-[var(--blush)] bg-white px-2 py-1 text-sm font-semibold normal-case tracking-normal text-[var(--cocoa)]"
+          placeholder="@client"
+          disabled={disabled}
+        />
+      </label>
+    </div>
+  );
+}
+
+function BookingEditablePaymentSummary({
+  proposedCents,
+  sub,
+  proposedDraft,
+  isEditingProposed,
+  onProposedDraftChange,
+  onToggleEditProposed,
+  onSaveProposed,
+  disabled,
+}: {
+  proposedCents: number | null;
+  sub: Submission;
+  proposedDraft: string;
+  isEditingProposed: boolean;
+  onProposedDraftChange: (value: string) => void;
+  onToggleEditProposed: () => void;
+  onSaveProposed: () => void;
+  disabled: boolean;
+}) {
+  const received = depositReceivedForRequest(sub, "deposit_received");
+  return (
+    <div className="grid gap-2 sm:grid-cols-3">
+      <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+          Proposed total
+        </p>
+        <div className="mt-0.5 flex items-center gap-1.5">
+          {isEditingProposed ? (
+            <input
+              value={proposedDraft}
+              onChange={(e) => onProposedDraftChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onSaveProposed();
+                }
+              }}
+              className="w-full rounded-md border border-[var(--blush)] bg-white px-2 py-1 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]"
+              placeholder="0.00"
+              disabled={disabled}
+              autoFocus
+            />
+          ) : (
+            <p className="min-h-8 pt-1 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
+              {proposedCents != null ? `$${formatMoneyCents(proposedCents)}` : "—"}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={isEditingProposed ? onSaveProposed : onToggleEditProposed}
+            disabled={disabled}
+            className="rounded-md border border-[var(--blush)] p-1 text-[var(--cocoa)] disabled:opacity-50"
+            aria-label={isEditingProposed ? "Save proposed total" : "Edit proposed total"}
+            title={isEditingProposed ? "Save proposed total" : "Edit proposed total"}
+          >
+            {isEditingProposed ? (
+              <Check className="size-4" aria-hidden />
+            ) : (
+              <Pencil className="size-4" aria-hidden />
+            )}
+          </button>
+        </div>
+      </div>
+      <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+          Deposit
+        </p>
+        <div className="mt-0.5 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--cocoa)]">
+          {received ? (
+            <>
+              <BadgeCheck className="size-4 text-[var(--coral)]" aria-hidden />
+              <span className="text-[var(--cocoa)]">Received</span>
+            </>
+          ) : (
+            <span className="text-[var(--cocoa-muted)]">Not received</span>
           )}
         </div>
       </div>
@@ -469,7 +740,7 @@ function BookingProgressBar({
       </div>
       <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--cream)] ring-1 ring-[var(--blush)]/70">
         <div
-          className="h-full rounded-full bg-emerald-600 transition-[width] duration-300"
+          className="h-full rounded-full bg-[var(--coral)] transition-[width] duration-300"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -478,12 +749,12 @@ function BookingProgressBar({
           <div key={s.key} className="text-center">
             <div className="mx-auto mb-0.5 flex h-5 items-center justify-center">
               {s.done ? (
-                <CheckCircle2 className="size-4 text-emerald-600" aria-hidden />
+                <CheckCircle2 className="size-4 text-[var(--coral)]" aria-hidden />
               ) : (
                 <span className="size-2 rounded-full bg-[var(--blush)]/80" aria-hidden />
               )}
             </div>
-            <span className={s.done ? "text-emerald-900" : ""}>{s.label}</span>
+            <span className={s.done ? "text-[var(--cocoa)]" : ""}>{s.label}</span>
           </div>
         ))}
       </div>
@@ -496,7 +767,6 @@ export function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("submitted");
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [letters, setLetters] = useState<InvLetter[]>([]);
-  const [invSource, setInvSource] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [drafts, setDrafts] = useState<
@@ -510,6 +780,12 @@ export function AdminDashboard() {
   const [cancelIntent, setCancelIntent] = useState<CancelIntent>(null);
   const [confirmBookingIntent, setConfirmBookingIntent] =
     useState<ConfirmBookingIntent>(null);
+  const [confirmBookingSuccess, setConfirmBookingSuccess] =
+    useState<ConfirmBookingSuccess>(null);
+  const [editingProposedById, setEditingProposedById] = useState<Record<string, boolean>>({});
+  const [bookingsView, setBookingsView] = useState<"list" | "calendar">("list");
+  const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null);
+  const [collapsedBookingIds, setCollapsedBookingIds] = useState<Record<string, boolean>>({});
   const feedbackTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const showCardFeedback = useCallback(
@@ -597,7 +873,6 @@ export function AdminDashboard() {
 
       setSubmissions(sortedSubmissions(sData.submissions ?? []));
       setLetters(iData.letters ?? []);
-      setInvSource(iData.source ?? "");
       const nextDrafts: Record<string, { proposed: string; venmo: string }> = {};
       for (const sub of sData.submissions ?? []) {
         nextDrafts[sub.id] = {
@@ -634,7 +909,6 @@ export function AdminDashboard() {
       return false;
     }
     setLetters(iParsed.data.letters ?? []);
-    setInvSource(iParsed.data.source ?? "");
     return true;
   }, [router]);
 
@@ -804,6 +1078,7 @@ export function AdminDashboard() {
   }
 
   async function confirmBooking(id: string) {
+    const preConfirmSub = submissions.find((s) => s.id === id) ?? null;
     setActionBusy((b) => ({ ...b, [id]: "book" }));
     try {
       const res = await fetch(`/api/admin/submissions/${id}/confirm-booking`, {
@@ -824,26 +1099,19 @@ export function AdminDashboard() {
       } else {
         void load({ silent: true });
       }
-      const ics = parsed.data.ics?.trim() || "";
-      if (ics) {
-        const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        if (isMobileBrowser()) {
-          window.location.assign(url);
-        } else {
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = "marquee-booking.ics";
-          a.click();
-        }
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      const confirmed = parsed.data.submission ?? preConfirmSub;
+      if (confirmed) {
+        setConfirmBookingSuccess({
+          id: confirmed.id,
+          clientName: confirmed.contactName,
+          eventDate: formatEventDateLong(confirmed.eventDate),
+          eventTime: formatTime12h(confirmed.eventTimeLocal),
+          location: compactLocationLine(confirmed),
+          lettering: confirmed.letteringRaw.trim().toUpperCase(),
+          googleCalendarUrl: buildGoogleCalendarUrl(confirmed),
+        });
       }
-      showCardFeedback(
-        id,
-        ics
-          ? "Booking confirmed. Calendar event file opened for iPhone/import."
-          : "Booking confirmed.",
-      );
+      showCardFeedback(id, "Booking confirmed.");
     } finally {
       setActionBusy((b) => {
         const n = { ...b };
@@ -941,13 +1209,37 @@ export function AdminDashboard() {
     () => submissions.filter((s) => requestStage(s, drafts[s.id]?.proposed ?? "") != null),
     [submissions, drafts],
   );
-  const bookings = useMemo(
-    () => submissions.filter((s) => s.pipelineStatus === "booked"),
-    [submissions],
-  );
+  const bookings = useMemo(() => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayMs = todayStart.getTime();
+    return submissions
+      .filter((s) => s.pipelineStatus === "booked" && !shouldAutoArchiveBooking(s))
+      .sort((a, b) => {
+        const aStart = eventStartForSubmission(a);
+        const bStart = eventStartForSubmission(b);
+        const aMs = aStart?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const bMs = bStart?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const aUpcoming = aMs >= todayMs;
+        const bUpcoming = bMs >= todayMs;
+        if (aUpcoming !== bUpcoming) return aUpcoming ? -1 : 1;
+        return aMs - bMs;
+      });
+  }, [submissions]);
+  const archiveBookings = useMemo(() => {
+    return submissions.filter(
+      (s) => s.pipelineStatus === "archived" || shouldAutoArchiveBooking(s),
+    );
+  }, [submissions]);
 
   if (loading) {
-    return <p className="text-[var(--cocoa-muted)]">Loading…</p>;
+    return (
+      <div className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-6">
+        <p className="inline-flex items-center rounded-xl bg-[var(--coral)] px-3 py-2 text-white">
+          <LoadingPulse label="Loading booking data" />
+        </p>
+      </div>
+    );
   }
 
   if (loadError) {
@@ -972,7 +1264,7 @@ export function AdminDashboard() {
 
   return (
     <div className="space-y-8">
-      <header className="flex flex-wrap items-center justify-between gap-4">
+      <header className="flex items-start justify-between gap-3">
         <div>
           <h1 className="font-[family-name:var(--font-display)] text-3xl text-[var(--cocoa)]">
             Admin queue
@@ -984,7 +1276,7 @@ export function AdminDashboard() {
         <button
           type="button"
           onClick={() => void logout()}
-          className="rounded-full border border-[var(--blush)] px-4 py-2 text-sm font-semibold text-[var(--cocoa)]"
+          className="ml-auto rounded-full border border-[var(--blush)] px-4 py-2 text-sm font-semibold text-[var(--cocoa)]"
         >
           Log out
         </button>
@@ -992,10 +1284,6 @@ export function AdminDashboard() {
 
       <section className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-4">
         <h2 className="font-semibold text-[var(--cocoa)]">Letter stock</h2>
-        <p className="mt-1 text-xs text-[var(--cocoa-muted)]">
-          Source: {invSource}. Edit counts in Google Sheet tab “Inventory” (A=letter,
-          B=qty from row 2). Counts reload every time you open the dashboard.
-        </p>
         <div className="mt-4 flex flex-wrap gap-2">
           {letters.map((l) => (
             <span
@@ -1018,10 +1306,7 @@ export function AdminDashboard() {
           className="mt-4 inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {syncing ? (
-            <>
-              <Spinner className="text-white" />
-              <span className="animate-pulse">Verifying…</span>
-            </>
+            <LoadingPulse label="Verifying" />
           ) : (
             "Verify Inventory tab"
           )}
@@ -1029,14 +1314,6 @@ export function AdminDashboard() {
         {invFeedback ? (
           <p className="mt-2 text-sm font-medium text-[var(--cocoa)]">{invFeedback}</p>
         ) : null}
-        <details className="mt-4 rounded-xl border border-[var(--blush)] bg-[var(--cream)]/30 p-3">
-          <summary className="cursor-pointer list-none text-sm font-semibold text-[var(--cocoa)] [&::-webkit-details-marker]:hidden">
-            Inventory source details
-          </summary>
-          <p className="mt-2 text-xs text-[var(--cocoa-muted)]">
-            Source: {invSource}. This section is secondary to the booking intake workflow.
-          </p>
-        </details>
       </section>
 
       <section className="space-y-4">
@@ -1044,6 +1321,7 @@ export function AdminDashboard() {
           activeTab={activeTab}
           submittedCount={submittedRequests.length}
           bookingCount={bookings.length}
+          archiveCount={archiveBookings.length}
           onChange={setActiveTab}
         />
 
@@ -1057,14 +1335,15 @@ export function AdminDashboard() {
                 const stage = requestStage(sub, draft.proposed);
                 if (!stage) return null;
                 const proposed = proposedCentsForSub(sub, draft.proposed);
-                const remainder = proposed != null ? Math.max(0, proposed - DEPOSIT_CENTS) : null;
                 const busy = actionBusy[sub.id];
                 const locked = busy !== undefined;
+                const isEditingProposed = Boolean(editingProposedById[sub.id]);
                 const phoneDisplay = formatUsPhoneDisplay(sub.contactPhone);
+                const smsUrl = smsDraftUrl(sub.contactPhone, sub.contactName);
                 const primary = (() => {
                   if (stage === "new_inquiry") return { label: "Set quote", fn: () => void saveDraft(sub.id), disabled: !draft.proposed.trim() };
                   if (stage === "quote_sent") return { label: "Request deposit", fn: () => void requestDeposit(sub), disabled: false };
-                  if (stage === "deposit_requested") return { label: "Mark deposit received", fn: () => void markDepositPaid(sub.id), disabled: false };
+                  if (stage === "deposit_requested") return { label: "Mark Deposit Received", fn: () => void markDepositPaid(sub.id), disabled: false };
                   return {
                     label: "Confirm booking",
                     fn: () =>
@@ -1100,10 +1379,21 @@ export function AdminDashboard() {
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa-muted)]">
                         {phoneDisplay ? (
-                          <span className="inline-flex items-center gap-1.5">
-                            <Phone className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
-                            <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
-                          </span>
+                          smsUrl ? (
+                            <a
+                              href={smsUrl}
+                              className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-[var(--blush)]/40"
+                              title="Open text message draft"
+                            >
+                              <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                              <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                            </a>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5">
+                              <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                              <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                            </span>
+                          )
                         ) : null}
                         <span className="inline-flex min-w-0 items-center gap-1.5">
                           <Mail className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
@@ -1113,7 +1403,35 @@ export function AdminDashboard() {
                     </div>
 
                     <div className="mt-3">
-                      <PaymentSummary proposedCents={proposed} stage={stage} sub={sub} />
+                      <SubmittedPaymentSummary
+                        proposedCents={proposed}
+                        stage={stage}
+                        sub={sub}
+                        proposedDraft={draft.proposed}
+                        venmoDraft={draft.venmo}
+                        isEditingProposed={isEditingProposed}
+                        onProposedDraftChange={(value) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [sub.id]: { proposed: value, venmo: d[sub.id]?.venmo ?? "" },
+                          }))
+                        }
+                        onToggleEditProposed={() =>
+                          setEditingProposedById((prev) => ({ ...prev, [sub.id]: true }))
+                        }
+                        onSaveProposed={() => {
+                          setEditingProposedById((prev) => ({ ...prev, [sub.id]: false }));
+                          void saveDraft(sub.id);
+                        }}
+                        onVenmoDraftChange={(value) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [sub.id]: { proposed: d[sub.id]?.proposed ?? "", venmo: value },
+                          }))
+                        }
+                        onSaveVenmo={() => void saveDraft(sub.id)}
+                        disabled={locked}
+                      />
                     </div>
 
                     <div className="mt-3 rounded-lg border border-[var(--blush)] bg-[var(--cream)]/40 px-3 py-2">
@@ -1140,53 +1458,18 @@ export function AdminDashboard() {
                       >
                         {busy ? (
                           <span className="inline-flex items-center gap-2">
-                            <Spinner className="text-white" />
-                            Working…
+                            <LoadingPulse label="Working" />
                           </span>
                         ) : (
-                          primary.label
+                          <span className="inline-flex items-center gap-2">
+                            {primary.label === "Mark Deposit Received" ? (
+                              <BadgeCheck className="size-4" aria-hidden />
+                            ) : null}
+                            <span>{primary.label}</span>
+                          </span>
                         )}
                       </button>
                     </div>
-
-                    <details className="mt-3 rounded-lg border border-[var(--blush)]/80 bg-white/70 p-3">
-                      <summary className="cursor-pointer text-xs font-semibold text-[var(--cocoa)]">Expanded details</summary>
-                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                        <label className="text-xs">
-                          Proposed ($)
-                          <input
-                            value={draft.proposed}
-                            onChange={(e) =>
-                              setDrafts((d) => ({
-                                ...d,
-                                [sub.id]: { proposed: e.target.value, venmo: d[sub.id]?.venmo ?? "" },
-                              }))
-                            }
-                            onBlur={() => void saveDraft(sub.id)}
-                            className="mt-1 w-full rounded-lg border border-[var(--blush)] px-2 py-1.5 text-sm"
-                          />
-                        </label>
-                        <label className="text-xs">
-                          Venmo @
-                          <input
-                            value={draft.venmo}
-                            onChange={(e) =>
-                              setDrafts((d) => ({
-                                ...d,
-                                [sub.id]: { proposed: d[sub.id]?.proposed ?? "", venmo: e.target.value },
-                              }))
-                            }
-                            onBlur={() => void saveDraft(sub.id)}
-                            className="mt-1 w-full rounded-lg border border-[var(--blush)] px-2 py-1.5 text-sm"
-                          />
-                        </label>
-                        <p className="text-xs text-[var(--cocoa-muted)] sm:col-span-2">
-                          Balance: {remainder != null ? `$${formatMoneyCents(remainder)}` : "—"} · Created{" "}
-                          {formatTimeAgo(sub.createdAt)}
-                        </p>
-                        <p className="text-xs text-[var(--cocoa-muted)] sm:col-span-2">ID: {sub.id}</p>
-                      </div>
-                    </details>
 
                     <div className="mt-3 flex justify-end border-t border-[var(--blush)]/70 pt-3">
                       <button
@@ -1206,44 +1489,399 @@ export function AdminDashboard() {
               })
             )}
           </div>
-        ) : (
+        ) : activeTab === "bookings" ? (
           <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--blush)] bg-[var(--card)]/70 px-3 py-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                Booking view
+              </p>
+              <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--blush)] bg-white/70 p-1">
+                <button
+                  type="button"
+                  onClick={() => setBookingsView("list")}
+                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${
+                    bookingsView === "list"
+                      ? "bg-[var(--cocoa)] text-white"
+                      : "text-[var(--cocoa)]"
+                  }`}
+                  title="Expanded list view"
+                >
+                  <List className="size-3.5" aria-hidden />
+                  List
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBookingsView("calendar")}
+                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${
+                    bookingsView === "calendar"
+                      ? "bg-[var(--cocoa)] text-white"
+                      : "text-[var(--cocoa)]"
+                  }`}
+                  title="Grid calendar-style view"
+                >
+                  <CalendarDays className="size-3.5" aria-hidden />
+                  Grid
+                </button>
+              </div>
+            </div>
             {bookings.length === 0 ? (
               <p className="text-sm text-[var(--cocoa-muted)]">No confirmed bookings yet.</p>
             ) : (
-              bookings.map((sub) => {
-                const draft = drafts[sub.id] ?? { proposed: "", venmo: "" };
-                const proposed = proposedCentsForSub(sub, draft.proposed);
-                const remainder = proposed != null ? Math.max(0, proposed - DEPOSIT_CENTS) : null;
-                const tasks = parseBookingTasks(sub.metadata);
-                const phoneDisplay = formatUsPhoneDisplay(sub.contactPhone);
-                const depositPaid =
-                  sub.pipelineStatus === "booked" ||
-                  sub.pipelineStatus === "deposit_paid" ||
-                  sub.depositPaidAt != null;
-                const balanceClear = remainder == null || remainder <= 0 || tasks.balancePaid;
-                const busy = actionBusy[sub.id];
-                const locked = busy !== undefined;
-                const nextTask: BookingTaskKey | null = !tasks.calendarCreated ? "calendarCreated" : !tasks.welcomeSent ? "welcomeSent" : !tasks.contractSent ? "contractSent" : remainder != null && remainder > 0 && !tasks.balancePaid ? "balancePaid" : null;
-                const nextAction = (() => {
-                  if (!nextTask) return { label: "Booking complete", fn: () => undefined, disabled: true };
-                  if (nextTask === "welcomeSent") {
+              <div className={bookingsView === "calendar" ? "grid gap-3 sm:grid-cols-2 lg:grid-cols-3" : "space-y-3"}>
+                {bookings.map((sub, idx) => {
+                  const draft = drafts[sub.id] ?? { proposed: "", venmo: "" };
+                  const proposed = proposedCentsForSub(sub, draft.proposed);
+                  const remainder = proposed != null ? Math.max(0, proposed - DEPOSIT_CENTS) : null;
+                  const tasks = parseBookingTasks(sub.metadata);
+                  const isEditingProposed = Boolean(editingProposedById[sub.id]);
+                  const phoneDisplay = formatUsPhoneDisplay(sub.contactPhone);
+                  const smsUrl = smsDraftUrl(sub.contactPhone, sub.contactName);
+                  const depositPaid =
+                    sub.pipelineStatus === "booked" ||
+                    sub.pipelineStatus === "deposit_paid" ||
+                    sub.depositPaidAt != null;
+                  const balanceClear = remainder == null || remainder <= 0 || tasks.balancePaid;
+                  const busy = actionBusy[sub.id];
+                  const locked = busy !== undefined;
+                  const isExpanded =
+                    bookingsView === "list"
+                      ? !collapsedBookingIds[sub.id]
+                      : expandedBookingId === sub.id;
+                  const eventDate = new Date(sub.eventDate);
+                  const day = Number.isNaN(eventDate.getTime())
+                    ? "--"
+                    : eventDate.toLocaleDateString("en-US", { day: "2-digit" });
+                  const month = Number.isNaN(eventDate.getTime())
+                    ? "Date"
+                    : eventDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase();
+                  const monthGroupLabel = Number.isNaN(eventDate.getTime())
+                    ? "Unknown month"
+                    : eventDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+                  const prevDate = idx > 0 ? new Date(bookings[idx - 1]!.eventDate) : null;
+                  const prevMonthGroupLabel =
+                    prevDate && !Number.isNaN(prevDate.getTime())
+                      ? prevDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })
+                      : "Unknown month";
+                  const showMonthBreak =
+                    bookingsView === "calendar" && (idx === 0 || monthGroupLabel !== prevMonthGroupLabel);
+                  const nextTask: BookingTaskKey | null = !tasks.calendarCreated
+                    ? "calendarCreated"
+                    : !tasks.welcomeSent
+                      ? "welcomeSent"
+                      : !tasks.contractSent
+                        ? "contractSent"
+                        : remainder != null && remainder > 0 && !tasks.balancePaid
+                          ? "balancePaid"
+                          : null;
+                  const nextAction = (() => {
+                    if (!nextTask) return { label: "Booking complete", fn: () => undefined, disabled: true };
+                    if (nextTask === "welcomeSent") {
+                      return {
+                        label: "Send welcome message",
+                        fn: () => {
+                          if (!welcomeClientSms(sub)) return alert("No usable phone number on this booking.");
+                          void updateBookingTask(sub.id, "welcomeSent", true);
+                        },
+                        disabled: false,
+                      };
+                    }
+                    if (nextTask === "calendarCreated") {
+                      return {
+                        label: "Create calendar event",
+                        fn: () => void updateBookingTask(sub.id, "calendarCreated", true),
+                        disabled: false,
+                      };
+                    }
+                    if (nextTask === "contractSent") {
+                      return {
+                        label: "Send contract",
+                        fn: () => void updateBookingTask(sub.id, "contractSent", true),
+                        disabled: false,
+                      };
+                    }
                     return {
-                      label: "Send welcome message",
-                      fn: () => {
-                        if (!welcomeClientSms(sub)) return alert("No usable phone number on this booking.");
-                        void updateBookingTask(sub.id, "welcomeSent", true);
-                      },
+                      label: "Mark balance paid",
+                      fn: () => void updateBookingTask(sub.id, "balancePaid", true),
                       disabled: false,
                     };
+                  })();
+                  const primaryIsComplete = nextAction.label === "Booking complete";
+
+                  if (!isExpanded) {
+                    return (
+                      <Fragment key={sub.id}>
+                        {showMonthBreak ? (
+                          <div className="sm:col-span-2 lg:col-span-3 border-b border-[var(--blush)]/70 pb-1 pt-2">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                              {monthGroupLabel}
+                            </p>
+                          </div>
+                        ) : null}
+                      <article
+                        className="cursor-pointer rounded-xl border border-[var(--blush)] bg-[var(--card)] p-4 text-left transition hover:bg-white/80"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          if (bookingsView === "list") {
+                            setCollapsedBookingIds((prev) => ({ ...prev, [sub.id]: false }));
+                            return;
+                          }
+                          setExpandedBookingId(sub.id);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter" && e.key !== " ") return;
+                          e.preventDefault();
+                          if (bookingsView === "list") {
+                            setCollapsedBookingIds((prev) => ({ ...prev, [sub.id]: false }));
+                            return;
+                          }
+                          setExpandedBookingId(sub.id);
+                        }}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="flex min-w-[4.25rem] flex-col items-center justify-center rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-2 py-2">
+                            <span className="text-[10px] font-bold tracking-widest text-[var(--coral)]">
+                              {month}
+                            </span>
+                            <span className="font-[family-name:var(--font-display)] text-3xl leading-none text-[var(--cocoa)]">
+                              {day}
+                            </span>
+                          </div>
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <p className="truncate text-sm font-semibold text-[var(--cocoa)]">
+                              {sub.contactName}
+                            </p>
+                            <p className="truncate font-[family-name:var(--font-display)] text-xl leading-tight text-[var(--cocoa)]">
+                              {sub.letteringRaw.trim().toUpperCase() || "—"}
+                            </p>
+                            <p className="inline-flex items-center gap-1.5 text-xs text-[var(--cocoa-muted)]">
+                              <Clock className="size-3.5" aria-hidden />
+                              {formatEventDateLong(sub.eventDate)} · {formatTime12h(sub.eventTimeLocal)}
+                            </p>
+                          </div>
+                          <span className="rounded-full border border-[var(--blush)] bg-white/80 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                            Upcoming
+                          </span>
+                        </div>
+                        <div className="mt-3 flex items-center justify-end gap-2">
+                          {smsUrl ? (
+                            <a
+                              href={smsUrl}
+                              onClick={(e) => e.stopPropagation()}
+                              className={`inline-flex items-center rounded-full px-3 py-1.5 text-xs font-semibold ${
+                                bookingsView === "calendar"
+                                  ? "bg-[var(--coral)] text-white"
+                                  : "rounded-lg border border-[var(--blush)] text-[var(--cocoa)]"
+                              }`}
+                              title="Open text message draft"
+                            >
+                              <MessageSquare className="size-3.5" aria-hidden />
+                              {bookingsView === "calendar" ? null : <span className="ml-1">Message</span>}
+                            </a>
+                          ) : null}
+                        </div>
+                      </article>
+                      </Fragment>
+                    );
                   }
-                  if (nextTask === "calendarCreated") return { label: "Create calendar event", fn: () => void updateBookingTask(sub.id, "calendarCreated", true), disabled: false };
-                  if (nextTask === "contractSent") return { label: "Send contract", fn: () => void updateBookingTask(sub.id, "contractSent", true), disabled: false };
-                  return { label: "Mark balance paid", fn: () => void updateBookingTask(sub.id, "balancePaid", true), disabled: false };
-                })();
-                const primaryIsComplete = nextAction.label === "Booking complete";
+
+                  return (
+                    <Fragment key={sub.id}>
+                      {showMonthBreak ? (
+                        <div className="sm:col-span-2 lg:col-span-3 border-b border-[var(--blush)]/70 pb-1 pt-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                            {monthGroupLabel}
+                          </p>
+                        </div>
+                      ) : null}
+                      <article
+                        className={`rounded-xl border border-[var(--blush)] bg-[var(--card)] p-4 ${
+                          bookingsView === "calendar" ? "sm:col-span-2 lg:col-span-3" : ""
+                        }`}
+                      >
+                      <div className="mb-3 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (bookingsView === "list") {
+                              setCollapsedBookingIds((prev) => ({ ...prev, [sub.id]: true }));
+                              return;
+                            }
+                            setExpandedBookingId(null);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-[var(--blush)] px-2.5 py-1 text-xs font-semibold text-[var(--cocoa)]"
+                        >
+                          <PanelsTopLeft className="size-3.5" aria-hidden />
+                          Collapse
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <ClientHeading
+                            name={sub.contactName}
+                            phrase={sub.letteringRaw}
+                            eventType={sub.eventType}
+                          />
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa-muted)]">
+                            <span className="inline-flex items-center gap-1.5">
+                              <Calendar className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                              <span>{formatEventDateLong(sub.eventDate)}</span>
+                            </span>
+                            <span className="inline-flex items-center gap-1.5">
+                              <Clock className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                              <span>{formatTime12h(sub.eventTimeLocal)}</span>
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-start gap-2 text-sm text-[var(--cocoa-muted)]">
+                            <MapPin className="mt-0.5 size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                            <span className="min-w-0 text-[var(--cocoa)]">{compactLocationLine(sub)}</span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa-muted)]">
+                            {phoneDisplay ? (
+                              smsUrl ? (
+                                <a
+                                  href={smsUrl}
+                                  className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-[var(--blush)]/40"
+                                  title="Open text message draft"
+                                >
+                                  <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                                  <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                                </a>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                                  <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                                </span>
+                              )
+                            ) : null}
+                            <span className="inline-flex min-w-0 items-center gap-1.5">
+                              <Mail className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                              <span className="min-w-0 break-all text-[var(--cocoa)]">{sub.contactEmail}</span>
+                            </span>
+                          </div>
+                        </div>
+                        <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900">
+                          <CheckCircle2 className="size-4 text-emerald-700" aria-hidden />
+                          Booked
+                        </div>
+                      </div>
+
+                      <div className="mt-3">
+                        <BookingEditablePaymentSummary
+                          proposedCents={proposed}
+                          sub={sub}
+                          proposedDraft={draft.proposed}
+                          isEditingProposed={isEditingProposed}
+                          onProposedDraftChange={(value) =>
+                            setDrafts((d) => ({
+                              ...d,
+                              [sub.id]: {
+                                proposed: value,
+                                venmo: d[sub.id]?.venmo ?? "",
+                              },
+                            }))
+                          }
+                          onToggleEditProposed={() =>
+                            setEditingProposedById((prev) => ({ ...prev, [sub.id]: true }))
+                          }
+                          onSaveProposed={() => {
+                            setEditingProposedById((prev) => ({ ...prev, [sub.id]: false }));
+                            void saveDraft(sub.id);
+                          }}
+                          disabled={locked}
+                        />
+                      </div>
+
+                      <div className="mt-3">
+                        <BookingProgressBar
+                          calendarDone={tasks.calendarCreated}
+                          welcomeDone={tasks.welcomeSent}
+                          contractDone={tasks.contractSent}
+                          depositPaid={depositPaid}
+                          balanceClear={balanceClear}
+                        />
+                      </div>
+
+                      <div className="mt-3 rounded-lg border border-[var(--blush)] bg-[var(--cream)]/40 px-3 py-2">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                          Notes
+                        </p>
+                        <div className="mt-1">
+                          <NotesBlock notes={sub.notes} />
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={nextAction.fn}
+                          disabled={locked || nextAction.disabled}
+                          className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-bold text-white transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 ${
+                            primaryIsComplete ? "bg-[var(--cocoa)]" : "bg-[var(--coral)]"
+                          }`}
+                        >
+                          {busy ? (
+                            <span className="inline-flex items-center gap-2">
+                              <LoadingPulse label="Working" />
+                            </span>
+                          ) : (
+                            nextAction.label
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openVenmoRemainder(sub)}
+                          disabled={locked || !remainder || remainder <= 0}
+                          className="rounded-lg border border-[var(--blush)] px-3 py-2 text-xs font-semibold text-[var(--cocoa)]"
+                        >
+                          Send balance link
+                        </button>
+                      </div>
+
+                      <details className="mt-3 rounded-lg border border-[var(--blush)]/80 bg-white/70 p-3">
+                        <summary className="cursor-pointer text-xs font-semibold text-[var(--cocoa)]">Adjust checklist</summary>
+                        <BookingTasksChecklist
+                          tasks={tasks}
+                          onToggle={(k, value) => void updateBookingTask(sub.id, k, value)}
+                        />
+                      </details>
+
+                      <div className="mt-3 flex justify-end border-t border-[var(--blush)]/70 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => setCancelIntent({ id: sub.id, label: "cancel this booking" })}
+                          disabled={locked}
+                          className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 disabled:opacity-50"
+                          title="Cancel booking"
+                        >
+                          <Trash2 className="size-4" aria-hidden />
+                          Cancel booking
+                        </button>
+                      </div>
+                      {feedbackById[sub.id] ? <p className="mt-2 text-xs text-[var(--cocoa-muted)]">{feedbackById[sub.id]}</p> : null}
+                      </article>
+                    </Fragment>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {archiveBookings.length === 0 ? (
+              <p className="text-sm text-[var(--cocoa-muted)]">
+                No archived bookings yet. Bookings auto-archive 48 hours after event start once fully paid.
+              </p>
+            ) : (
+              archiveBookings.map((sub) => {
+                const phoneDisplay = formatUsPhoneDisplay(sub.contactPhone);
+                const smsUrl = smsDraftUrl(sub.contactPhone, sub.contactName);
+                const start = eventStartForSubmission(sub);
                 return (
-                  <article key={sub.id} className="rounded-xl border border-[var(--blush)] bg-[var(--card)] p-4">
+                  <article
+                    key={sub.id}
+                    className="rounded-xl border border-[var(--blush)] bg-[var(--card)] p-4 opacity-95"
+                  >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0 flex-1 space-y-2">
                         <ClientHeading
@@ -1267,10 +1905,21 @@ export function AdminDashboard() {
                         </div>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--cocoa-muted)]">
                           {phoneDisplay ? (
-                            <span className="inline-flex items-center gap-1.5">
-                              <Phone className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
-                              <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
-                            </span>
+                            smsUrl ? (
+                              <a
+                                href={smsUrl}
+                                className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-[var(--blush)]/40"
+                                title="Open text message draft"
+                              >
+                                <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                                <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                              </a>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5">
+                                <MessageSquare className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
+                                <span className="font-mono text-[var(--cocoa)] tabular-nums">{phoneDisplay}</span>
+                              </span>
+                            )
                           ) : null}
                           <span className="inline-flex min-w-0 items-center gap-1.5">
                             <Mail className="size-4 shrink-0 text-[var(--cocoa-muted)]" aria-hidden />
@@ -1278,84 +1927,14 @@ export function AdminDashboard() {
                           </span>
                         </div>
                       </div>
-                      <div className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900">
-                        <CheckCircle2 className="size-4 text-emerald-700" aria-hidden />
-                        Booked
+                      <div className="inline-flex items-center gap-1 rounded-full border border-stone-300 bg-stone-100 px-2.5 py-1 text-xs font-semibold text-stone-700">
+                        <CheckCircle2 className="size-4 text-stone-600" aria-hidden />
+                        Archived
                       </div>
                     </div>
-
-                    <div className="mt-3">
-                      <PaymentSummary proposedCents={proposed} stage="deposit_received" sub={sub} />
-                    </div>
-
-                    <div className="mt-3">
-                      <BookingProgressBar
-                        calendarDone={tasks.calendarCreated}
-                        welcomeDone={tasks.welcomeSent}
-                        contractDone={tasks.contractSent}
-                        depositPaid={depositPaid}
-                        balanceClear={balanceClear}
-                      />
-                    </div>
-
-                    <div className="mt-3 rounded-lg border border-[var(--blush)] bg-[var(--cream)]/40 px-3 py-2">
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                        Notes
-                      </p>
-                      <div className="mt-1">
-                        <NotesBlock notes={sub.notes} />
-                      </div>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={nextAction.fn}
-                        disabled={locked || nextAction.disabled}
-                        className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-bold text-white transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 ${
-                          primaryIsComplete ? "bg-[var(--cocoa)]" : "bg-[var(--coral)]"
-                        }`}
-                      >
-                        {busy ? (
-                          <span className="inline-flex items-center gap-2">
-                            <Spinner className="text-white" />
-                            Working…
-                          </span>
-                        ) : (
-                          nextAction.label
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openVenmoRemainder(sub)}
-                        disabled={locked || !remainder || remainder <= 0}
-                        className="rounded-lg border border-[var(--blush)] px-3 py-2 text-xs font-semibold text-[var(--cocoa)]"
-                      >
-                        Send balance link
-                      </button>
-                    </div>
-
-                    <details className="mt-3 rounded-lg border border-[var(--blush)]/80 bg-white/70 p-3">
-                      <summary className="cursor-pointer text-xs font-semibold text-[var(--cocoa)]">Adjust checklist</summary>
-                      <BookingTasksChecklist
-                        tasks={tasks}
-                        onToggle={(k, value) => void updateBookingTask(sub.id, k, value)}
-                      />
-                    </details>
-
-                    <div className="mt-3 flex justify-end border-t border-[var(--blush)]/70 pt-3">
-                      <button
-                        type="button"
-                        onClick={() => setCancelIntent({ id: sub.id, label: "cancel this booking" })}
-                        disabled={locked}
-                        className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 disabled:opacity-50"
-                        title="Cancel booking"
-                      >
-                        <Trash2 className="size-4" aria-hidden />
-                        Cancel booking
-                      </button>
-                    </div>
-                    {feedbackById[sub.id] ? <p className="mt-2 text-xs text-[var(--cocoa-muted)]">{feedbackById[sub.id]}</p> : null}
+                    <p className="mt-3 text-xs text-[var(--cocoa-muted)]">
+                      {start ? `Archived after ${formatEventDateLong(start.toISOString())} event window.` : "Archived booking."}
+                    </p>
                   </article>
                 );
               })
@@ -1425,6 +2004,65 @@ export function AdminDashboard() {
               >
                 Yes, confirm booking
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {confirmBookingSuccess ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-[var(--blush)] bg-[var(--card)] p-5 shadow-xl">
+            <div className="flex items-start gap-3">
+              <Calendar className="mt-1 size-8 text-[var(--coral)]" aria-hidden />
+              <div>
+                <h3 className="text-lg font-semibold text-[var(--cocoa)]">
+                  Success, booking is confirmed.
+                </h3>
+                <p className="mt-1 text-sm text-[var(--cocoa-muted)]">
+                  This event is moved into your Bookings tab. Thank you.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2 rounded-lg border border-[var(--blush)] bg-[var(--cream)]/35 p-3">
+              <p className="text-sm font-semibold text-[var(--cocoa)]">
+                {confirmBookingSuccess.clientName}
+              </p>
+              <p className="inline-flex items-center gap-1.5 text-sm text-[var(--cocoa-muted)]">
+                <Calendar className="size-4" aria-hidden />
+                {confirmBookingSuccess.eventDate}
+              </p>
+              <p className="inline-flex items-center gap-1.5 text-sm text-[var(--cocoa-muted)]">
+                <Clock className="size-4" aria-hidden />
+                {confirmBookingSuccess.eventTime}
+              </p>
+              <p className="inline-flex items-start gap-1.5 text-sm text-[var(--cocoa-muted)]">
+                <MapPin className="mt-0.5 size-4" aria-hidden />
+                <span>{confirmBookingSuccess.location}</span>
+              </p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                Letters reserved
+              </p>
+              <LetteringTiles text={confirmBookingSuccess.lettering} />
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmBookingSuccess(null)}
+                className="rounded-lg border border-[var(--blush)] px-3 py-2 text-sm font-semibold text-[var(--cocoa)]"
+              >
+                Close
+              </button>
+              <a
+                href={confirmBookingSuccess.googleCalendarUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-lg bg-[var(--coral)] px-3 py-2 text-sm font-bold text-white"
+              >
+                Add this event to your Google Calendar
+                <ExternalLink className="size-4" aria-hidden />
+              </a>
             </div>
           </div>
         </div>
