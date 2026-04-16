@@ -297,5 +297,6 @@ export function sheetSubmissionToApiJson(sub: SheetSubmission) {
     depositRequestedAt: sub.depositRequestedAt?.toISOString() ?? null,
     depositPaidAt: sub.depositPaidAt?.toISOString() ?? null,
     bookingConfirmedAt: sub.bookingConfirmedAt?.toISOString() ?? null,
+    metadata: sub.metadata,
   };
 }
