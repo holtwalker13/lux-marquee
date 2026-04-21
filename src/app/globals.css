@@ -23,3 +23,112 @@ body {
   color: var(--cocoa);
   font-family: var(--font-nunito), system-ui, sans-serif;
 }
+
+/* Injected rental agreement HTML (/sign-rental-agreement + admin previews) */
+.agreement-doc {
+  --agreement-text: var(--cocoa);
+  --agreement-heading: var(--cocoa);
+  --agreement-border: color-mix(in srgb, var(--blush) 88%, var(--cocoa) 12%);
+  --agreement-accent: var(--coral);
+  color: var(--agreement-text);
+  line-height: 1.55;
+  font-size: 0.95rem;
+}
+.agreement-doc__title {
+  font-family: var(--font-fraunces), Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+  color: var(--agreement-heading);
+}
+.agreement-doc__lead {
+  margin: 0 0 0.5rem;
+  max-width: 42rem;
+}
+.agreement-doc__lead + .agreement-doc__lead {
+  margin-top: 0.85rem;
+}
+.agreement-doc__section {
+  margin-top: 1.35rem;
+  padding-top: 1.35rem;
+  border-top: 1px solid var(--agreement-border);
+}
+.agreement-doc__section:first-of-type {
+  margin-top: 1rem;
+  padding-top: 0;
+  border-top: none;
+}
+.agreement-doc__section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 0.85rem;
+}
+.agreement-doc__section-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-family: var(--font-nunito), system-ui, sans-serif;
+  color: var(--agreement-heading);
+}
+.agreement-doc__icon-wrap {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--agreement-accent);
+}
+.agreement-doc__icon {
+  display: block;
+}
+.agreement-doc__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.agreement-doc__list li {
+  margin: 0.5rem 0;
+  padding: 0;
+  line-height: 1.5;
+}
+.agreement-doc__list li:first-child {
+  margin-top: 0;
+}
+.agreement-doc__list li:last-child {
+  margin-bottom: 0;
+}
+.agreement-doc__p {
+  margin: 0.65rem 0 0;
+  max-width: 42rem;
+}
+.agreement-doc__p:first-of-type {
+  margin-top: 0;
+}
+.agreement-doc__p--tight {
+  margin-top: 0.45rem;
+}
+.agreement-doc__p--spaced {
+  margin-top: 1rem;
+}
+.agreement-doc__signed {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--agreement-border);
+}
+
+/* Admin letter stock weekend ticker */
+@keyframes letter-stock-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+.letter-stock-marquee {
+  animation: letter-stock-marquee 40s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .letter-stock-marquee {
+    animation: none;
+  }
+}

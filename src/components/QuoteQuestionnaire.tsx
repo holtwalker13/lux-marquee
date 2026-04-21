@@ -539,7 +539,9 @@ export function QuoteQuestionnaire() {
               Examples: <span className="font-medium text-[var(--cocoa)]">3</span>,{" "}
               <span className="font-medium text-[var(--cocoa)]">LOVE</span>,{" "}
               <span className="font-medium text-[var(--cocoa)]">BABY GIRL</span> — use
-              spaces between words if you like.
+              spaces between words. The word{" "}
+              <span className="font-medium text-[var(--cocoa)]">THE</span> as its own word
+              counts as one physical block (not three separate letters).
             </p>
             <label className="mt-6 block">
               <span className="sr-only">Lettering</span>

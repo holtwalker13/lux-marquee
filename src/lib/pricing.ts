@@ -1,3 +1,5 @@
+import { tokenizeInventoryGlyphs } from "@/lib/letter-inventory-tokens";
+
 /** @see docs/PRD.md §5 — safe to import from Client Components */
 export const LETTERING_MAX_LENGTH = 48;
 
@@ -57,8 +59,9 @@ export function validateLetteringNormalized(
   return true;
 }
 
+/** Billable inventory units (letters, digits, symbols, and whole-word THE). */
 export function getBillableGlyphs(normalized: string): string[] {
-  return [...normalized].filter((c) => c !== " ");
+  return tokenizeInventoryGlyphs(normalized);
 }
 
 export type GlyphLine = {

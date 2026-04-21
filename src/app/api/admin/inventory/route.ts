@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireAdminSession } from "@/lib/admin-request";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
-import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
+import { fetchAllReservationsFromSheet, isGoogleSheetsConfigured } from "@/lib/google-sheets";
+import { buildWeekendInventoryTickerMessage } from "@/lib/weekend-inventory-ticker";
 
 export async function GET() {
   if (!(await requireAdminSession())) {
@@ -14,9 +15,18 @@ export async function GET() {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([letter, totalQuantity]) => ({ letter, totalQuantity }));
 
+    let weekendTicker: string | null = null;
+    try {
+      const reservations = await fetchAllReservationsFromSheet();
+      weekendTicker = buildWeekendInventoryTickerMessage(totals, reservations);
+    } catch (tickerErr) {
+      console.error("[admin/inventory GET] weekend ticker", tickerErr);
+    }
+
     return NextResponse.json({
       letters,
       source: "google_sheet",
+      weekendTicker,
     });
   } catch (e) {
     console.error("[admin/inventory GET]", e);

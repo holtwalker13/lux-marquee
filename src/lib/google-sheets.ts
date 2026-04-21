@@ -3,6 +3,7 @@ import {
   SUBMIT_REQUEST_COL_COUNT,
   SUBMIT_REQUEST_HEADERS,
 } from "@/lib/submission-sheet-schema";
+import { isInventorySheetKey } from "@/lib/letter-inventory-tokens";
 
 export { SUBMIT_REQUEST_HEADERS };
 
@@ -276,14 +277,12 @@ export async function fetchLetterInventoryFromSheet(): Promise<Map<string, numbe
 
   const map = new Map<string, number>();
   for (const row of rows) {
-    const letter = String(row[0] ?? "")
+    const key = String(row[0] ?? "")
       .trim()
-      .toUpperCase()
-      .slice(0, 1);
+      .toUpperCase();
     const qty = Number(row[1]);
-    if (letter >= "A" && letter <= "Z" && Number.isFinite(qty) && qty >= 0) {
-      map.set(letter, qty);
-    }
+    if (!isInventorySheetKey(key) || !Number.isFinite(qty) || qty < 0) continue;
+    map.set(key, qty);
   }
   return map;
 }

@@ -18,6 +18,7 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
+import { RentalAgreementAdminPanel } from "@/components/RentalAgreementAdminPanel";
 import { buildVenmoChargeUrl, depositAmountDollars } from "@/lib/venmo-deposit";
 
 type Submission = {
@@ -522,6 +523,7 @@ function BookingEditablePaymentSummary({
   onToggleEditProposed,
   onSaveProposed,
   disabled,
+  sendBalanceLink,
 }: {
   proposedCents: number | null;
   sub: Submission;
@@ -531,6 +533,7 @@ function BookingEditablePaymentSummary({
   onToggleEditProposed: () => void;
   onSaveProposed: () => void;
   disabled: boolean;
+  sendBalanceLink?: { onClick: () => void; disabled: boolean };
 }) {
   const received = depositReceivedForRequest(sub, "deposit_received");
   return (
@@ -591,13 +594,25 @@ function BookingEditablePaymentSummary({
           )}
         </div>
       </div>
-      <div className="rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
-        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-          Balance
-        </p>
-        <p className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
-          {proposedCents != null ? `$${formatMoneyCents(Math.max(0, proposedCents - DEPOSIT_CENTS))}` : "—"}
-        </p>
+      <div className="flex min-w-0 items-end gap-2">
+        <div className="min-w-0 flex-1 rounded-lg border border-[var(--blush)]/80 bg-white/60 px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+            Balance
+          </p>
+          <p className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[var(--cocoa)]">
+            {proposedCents != null ? `$${formatMoneyCents(Math.max(0, proposedCents - DEPOSIT_CENTS))}` : "—"}
+          </p>
+        </div>
+        {sendBalanceLink ? (
+          <button
+            type="button"
+            onClick={sendBalanceLink.onClick}
+            disabled={sendBalanceLink.disabled}
+            className="shrink-0 rounded-lg border border-[var(--blush)] px-3 py-2 text-xs font-semibold text-[var(--cocoa)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Send balance link
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -672,72 +687,85 @@ function ClientHeading({
   );
 }
 
-function BookingTasksChecklist({
-  tasks,
-  onToggle,
-}: {
-  tasks: BookingTasks;
-  onToggle: (key: BookingTaskKey, value: boolean) => void;
-}) {
-  return (
-    <div className="mt-2 grid gap-2 text-sm">
-      {(["calendarCreated", "welcomeSent", "contractSent", "balancePaid"] as BookingTaskKey[]).map(
-        (key) => (
-          <label key={key} className="inline-flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={tasks[key]}
-              onChange={(e) => onToggle(key, e.target.checked)}
-            />
-            <span>
-              {key === "calendarCreated"
-                ? "Calendar event created"
-                : key === "welcomeSent"
-                  ? "Welcome message sent"
-                  : key === "contractSent"
-                    ? "Contract sent"
-                    : "Balance paid"}
-            </span>
-          </label>
-        ),
-      )}
-    </div>
-  );
+function bookingTaskKeyForProgressStep(
+  step: "calendar" | "welcome" | "contract" | "deposit" | "balance",
+): BookingTaskKey | null {
+  if (step === "calendar") return "calendarCreated";
+  if (step === "welcome") return "welcomeSent";
+  if (step === "contract") return "contractSent";
+  if (step === "balance") return "balancePaid";
+  return null;
 }
 
 function BookingProgressBar({
+  tasks,
   calendarDone,
   welcomeDone,
   contractDone,
   depositPaid,
   balanceClear,
+  locked,
+  onToggleTask,
 }: {
+  tasks: BookingTasks;
   calendarDone: boolean;
   welcomeDone: boolean;
   contractDone: boolean;
   depositPaid: boolean;
   balanceClear: boolean;
+  locked: boolean;
+  onToggleTask: (key: BookingTaskKey, value: boolean) => void;
 }) {
+  const [adjustMode, setAdjustMode] = useState(false);
   const steps = [
-    { key: "calendar", label: "Calendar", done: calendarDone },
-    { key: "welcome", label: "Welcome", done: welcomeDone },
-    { key: "contract", label: "Contract", done: contractDone },
-    { key: "deposit", label: "Deposit", done: depositPaid },
-    { key: "balance", label: "Balance", done: balanceClear },
-  ] as const;
+    { key: "calendar" as const, label: "Calendar", done: calendarDone },
+    { key: "welcome" as const, label: "Welcome", done: welcomeDone },
+    { key: "contract" as const, label: "Contract", done: contractDone },
+    { key: "deposit" as const, label: "Deposit", done: depositPaid },
+    { key: "balance" as const, label: "Balance", done: balanceClear },
+  ];
   const doneCount = steps.filter((s) => s.done).length;
   const pct = Math.round((doneCount / steps.length) * 100);
 
   return (
-    <div className="space-y-2">
+    <div
+      className={`space-y-2 rounded-lg px-0.5 py-0.5 transition-colors ${
+        adjustMode ? "bg-[var(--coral)]/5 ring-1 ring-[var(--coral)]/30" : ""
+      }`}
+    >
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-          Progress
-        </p>
-        <p className="text-xs font-semibold text-[var(--cocoa)]">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+            Progress
+          </p>
+          <button
+            type="button"
+            aria-pressed={adjustMode}
+            aria-label={adjustMode ? "Done adjusting progress" : "Adjust progress steps"}
+            title={
+              adjustMode
+                ? "Tap steps below to toggle, or click to finish"
+                : "Toggle steps manually (e.g. contract revised)"
+            }
+            onClick={() => setAdjustMode((v) => !v)}
+            className={`rounded-md border p-1 transition ${
+              adjustMode
+                ? "border-[var(--coral)] bg-white text-[var(--coral)]"
+                : "border-transparent text-[var(--cocoa-muted)] hover:border-[var(--blush)] hover:bg-white/80 hover:text-[var(--cocoa)]"
+            }`}
+          >
+            <Pencil className="size-3.5" aria-hidden />
+          </button>
+        </div>
+        <p className="shrink-0 text-xs font-semibold text-[var(--cocoa)]">
           {doneCount}/{steps.length}
         </p>
       </div>
+      {adjustMode ? (
+        <p className="text-[10px] leading-snug text-[var(--cocoa-muted)]">
+          Tap Calendar, Welcome, Contract, or Balance to update. Deposit follows payment records.
+        </p>
+      ) : null}
       <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--cream)] ring-1 ring-[var(--blush)]/70">
         <div
           className="h-full rounded-full bg-[var(--coral)] transition-[width] duration-300"
@@ -745,8 +773,10 @@ function BookingProgressBar({
         />
       </div>
       <div className="grid grid-cols-5 gap-1 text-[10px] font-semibold text-[var(--cocoa-muted)]">
-        {steps.map((s) => (
-          <div key={s.key} className="text-center">
+        {steps.map((s) => {
+          const taskKey = bookingTaskKeyForProgressStep(s.key);
+          const canToggle = adjustMode && !locked && taskKey != null;
+          const icon = (
             <div className="mx-auto mb-0.5 flex h-5 items-center justify-center">
               {s.done ? (
                 <CheckCircle2 className="size-4 text-[var(--coral)]" aria-hidden />
@@ -754,9 +784,38 @@ function BookingProgressBar({
                 <span className="size-2 rounded-full bg-[var(--blush)]/80" aria-hidden />
               )}
             </div>
-            <span className={s.done ? "text-[var(--cocoa)]" : ""}>{s.label}</span>
-          </div>
-        ))}
+          );
+          const label = <span className={s.done ? "text-[var(--cocoa)]" : ""}>{s.label}</span>;
+
+          if (canToggle) {
+            return (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => onToggleTask(taskKey, !tasks[taskKey])}
+                className="rounded-md px-0.5 py-1 text-center text-[var(--cocoa-muted)] outline-none ring-[var(--coral)]/40 transition hover:bg-white/90 focus-visible:ring-2"
+              >
+                {icon}
+                {label}
+              </button>
+            );
+          }
+
+          return (
+            <div
+              key={s.key}
+              className={`text-center ${adjustMode && s.key === "deposit" ? "opacity-90" : ""}`}
+              title={
+                adjustMode && s.key === "deposit"
+                  ? "Deposit reflects payment status on the booking, not this checklist."
+                  : undefined
+              }
+            >
+              {icon}
+              {label}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -767,6 +826,7 @@ export function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("submitted");
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [letters, setLetters] = useState<InvLetter[]>([]);
+  const [inventoryWeekendTicker, setInventoryWeekendTicker] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [drafts, setDrafts] = useState<
@@ -814,7 +874,11 @@ export function AdminDashboard() {
   }, []);
 
   const applyServerSubmission = useCallback((updated: Submission) => {
-    setSubmissions((prev) => replaceSubmissionInList(prev, updated));
+    setSubmissions((prev) => {
+      const cur = prev.find((s) => s.id === updated.id);
+      const merged = cur ? ({ ...cur, ...updated } as Submission) : updated;
+      return replaceSubmissionInList(prev, merged);
+    });
     setDrafts((d) => ({
       ...d,
       [updated.id]: {
@@ -856,6 +920,7 @@ export function AdminDashboard() {
       const iParsed = await parseJsonBody<{
         letters?: InvLetter[];
         source?: string;
+        weekendTicker?: string | null;
         error?: string;
       }>(iRes, "inventory");
 
@@ -873,6 +938,11 @@ export function AdminDashboard() {
 
       setSubmissions(sortedSubmissions(sData.submissions ?? []));
       setLetters(iData.letters ?? []);
+      setInventoryWeekendTicker(
+        typeof iData.weekendTicker === "string" && iData.weekendTicker.trim()
+          ? iData.weekendTicker.trim()
+          : null,
+      );
       const nextDrafts: Record<string, { proposed: string; venmo: string }> = {};
       for (const sub of sData.submissions ?? []) {
         nextDrafts[sub.id] = {
@@ -900,15 +970,21 @@ export function AdminDashboard() {
       router.push("/admin/login");
       return false;
     }
-    const iParsed = await parseJsonBody<{ letters?: InvLetter[]; source?: string }>(
-      iRes,
-      "inventory",
-    );
+    const iParsed = await parseJsonBody<{
+      letters?: InvLetter[];
+      source?: string;
+      weekendTicker?: string | null;
+    }>(iRes, "inventory");
     if (!iParsed.ok) {
       alert(iParsed.message);
       return false;
     }
     setLetters(iParsed.data.letters ?? []);
+    setInventoryWeekendTicker(
+      typeof iParsed.data.weekendTicker === "string" && iParsed.data.weekendTicker.trim()
+        ? iParsed.data.weekendTicker.trim()
+        : null,
+    );
     return true;
   }, [router]);
 
@@ -1052,19 +1128,49 @@ export function AdminDashboard() {
   }
 
   async function markDepositPaid(id: string) {
+    const snapshot = submissions.find((s) => s.id === id) ?? null;
+    if (!snapshot) return;
+
+    if (snapshot.pipelineStatus === "deposit_requested") {
+      setSubmissions((prev) => {
+        const cur = prev.find((s) => s.id === id);
+        if (!cur) return prev;
+        return replaceSubmissionInList(prev, {
+          ...cur,
+          pipelineStatus: "deposit_paid",
+          depositPaidAt: cur.depositPaidAt ?? new Date().toISOString(),
+        });
+      });
+    }
+
     setActionBusy((b) => ({ ...b, [id]: "paid" }));
     try {
       const res = await fetch(`/api/admin/submissions/${id}/mark-deposit-paid`, {
         method: "POST",
+        cache: "no-store",
       });
       const parsed = await parseJsonBody<{ submission?: Submission }>(res, "mark paid");
       if (!parsed.ok) {
+        if (snapshot.pipelineStatus === "deposit_requested") {
+          applyServerSubmission(snapshot);
+        } else {
+          void load({ silent: true });
+        }
         alert(parsed.message);
         return;
       }
       if (parsed.data.submission) {
         applyServerSubmission(parsed.data.submission);
       } else {
+        setSubmissions((prev) => {
+          const cur = prev.find((s) => s.id === id);
+          if (!cur) return prev;
+          return replaceSubmissionInList(prev, {
+            ...cur,
+            pipelineStatus: "deposit_paid",
+            depositPaidAt: cur.depositPaidAt ?? new Date().toISOString(),
+          });
+        });
         void load({ silent: true });
       }
       showCardFeedback(id, "Marked paid — sheet updated");
@@ -1284,13 +1390,32 @@ export function AdminDashboard() {
 
       <section className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-4">
         <h2 className="font-semibold text-[var(--cocoa)]">Letter stock</h2>
+        {inventoryWeekendTicker ? (
+          <div
+            className="relative mt-3 overflow-hidden rounded-lg border border-amber-200/90 bg-amber-50/90 py-2 text-xs font-semibold text-amber-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="letter-stock-marquee flex w-max min-w-full">
+              <span className="inline-block shrink-0 px-4">{inventoryWeekendTicker}</span>
+              <span className="inline-block shrink-0 px-4" aria-hidden>
+                {inventoryWeekendTicker}
+              </span>
+            </div>
+          </div>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           {letters.map((l) => (
             <span
               key={l.letter}
               className="inline-flex items-end gap-1 rounded-xl bg-[var(--cream)] px-3 py-1.5"
             >
-              <span className="font-[family-name:var(--font-display)] text-lg font-bold leading-none text-[var(--cocoa)]">
+              <span
+                className={`font-[family-name:var(--font-display)] font-bold leading-none text-[var(--cocoa)] ${
+                  l.letter.length > 1 ? "text-sm tracking-tight" : "text-lg"
+                }`}
+                title={l.letter}
+              >
                 {l.letter}
               </span>
               <span className="text-xs font-medium text-[var(--cocoa-muted)]">
@@ -1442,6 +1567,13 @@ export function AdminDashboard() {
                         <NotesBlock notes={sub.notes} />
                       </div>
                     </div>
+
+                    <RentalAgreementAdminPanel
+                      submissionId={sub.id}
+                      contactName={sub.contactName}
+                      metadata={sub.metadata}
+                      disabled={locked}
+                    />
 
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <button
@@ -1789,16 +1921,23 @@ export function AdminDashboard() {
                             void saveDraft(sub.id);
                           }}
                           disabled={locked}
+                          sendBalanceLink={{
+                            onClick: () => openVenmoRemainder(sub),
+                            disabled: locked || !remainder || remainder <= 0,
+                          }}
                         />
                       </div>
 
                       <div className="mt-3">
                         <BookingProgressBar
+                          tasks={tasks}
                           calendarDone={tasks.calendarCreated}
                           welcomeDone={tasks.welcomeSent}
                           contractDone={tasks.contractSent}
                           depositPaid={depositPaid}
                           balanceClear={balanceClear}
+                          locked={locked}
+                          onToggleTask={(key, value) => void updateBookingTask(sub.id, key, value)}
                         />
                       </div>
 
@@ -1810,6 +1949,13 @@ export function AdminDashboard() {
                           <NotesBlock notes={sub.notes} />
                         </div>
                       </div>
+
+                      <RentalAgreementAdminPanel
+                        submissionId={sub.id}
+                        contactName={sub.contactName}
+                        metadata={sub.metadata}
+                        disabled={locked}
+                      />
 
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <button
@@ -1828,23 +1974,7 @@ export function AdminDashboard() {
                             nextAction.label
                           )}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => openVenmoRemainder(sub)}
-                          disabled={locked || !remainder || remainder <= 0}
-                          className="rounded-lg border border-[var(--blush)] px-3 py-2 text-xs font-semibold text-[var(--cocoa)]"
-                        >
-                          Send balance link
-                        </button>
                       </div>
-
-                      <details className="mt-3 rounded-lg border border-[var(--blush)]/80 bg-white/70 p-3">
-                        <summary className="cursor-pointer text-xs font-semibold text-[var(--cocoa)]">Adjust checklist</summary>
-                        <BookingTasksChecklist
-                          tasks={tasks}
-                          onToggle={(k, value) => void updateBookingTask(sub.id, k, value)}
-                        />
-                      </details>
 
                       <div className="mt-3 flex justify-end border-t border-[var(--blush)]/70 pt-3">
                         <button

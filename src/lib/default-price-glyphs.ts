@@ -20,5 +20,6 @@ export function getDefaultPriceGlyphRows(): PriceGlyphRow[] {
   for (const glyph of ["&", "-", "'"]) {
     glyphs.push({ glyph, priceCents: 5500 });
   }
+  glyphs.push({ glyph: "THE", priceCents: 15_000 });
   return glyphs;
 }

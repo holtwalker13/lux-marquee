@@ -35,6 +35,8 @@ const LETTER_STOCK: [string, number][] = [
   ["X", 1],
   ["Y", 3],
   ["Z", 1],
+  ["&", 2],
+  ["THE", 2],
 ];
 
 function tabName(): string {
