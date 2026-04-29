@@ -2,6 +2,10 @@ import type { RentalAgreementSignatureV1, RentalAgreementSnapshotV1 } from "@/li
 import { snapshotFeeLabel } from "@/lib/rental-agreement-metadata";
 import { formatUsd } from "@/lib/pricing";
 
+const LESSOR_LEGAL_NAME = "Lux Marquee Rentals, LLC";
+const LESSOR_EMAIL = "luxmarqueerentals@yahoo.com";
+const LESSOR_SHORT = "Lux Marquee Rentals, LLC";
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -22,6 +26,30 @@ function formatDisplayDate(isoDate: string): string {
   });
 }
 
+function addOneCalendarDayIso(isoDate: string): string {
+  const d = new Date(`${isoDate}T12:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) return isoDate;
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function formatTime12h(hm: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm.trim());
+  if (!m) return hm.trim();
+  let h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min)) return hm.trim();
+  h = Math.min(23, Math.max(0, h));
+  const ampm = h < 12 ? "am" : "pm";
+  const hour12 = h % 12 === 0 ? 12 : h % 12;
+  const minStr = min === 0 ? "" : `:${String(min).padStart(2, "0")}`;
+  return `${hour12}${minStr} ${ampm}`;
+}
+
+function marqueeQuantity(snap: RentalAgreementSnapshotV1): number {
+  return snap.lettering.replace(/\s+/g, "").length || 0;
+}
+
 /** Inline SVGs (currentColor) — work in app + downloaded HTML. */
 const ICON_CALENDAR = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg></span>`;
 
@@ -29,11 +57,17 @@ const ICON_SPARKLES = `<span class="agreement-doc__icon-wrap" aria-hidden="true"
 
 const ICON_BANKNOTE = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg></span>`;
 
+const ICON_TRUCK = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></svg></span>`;
+
+const ICON_SHIELD = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 6a1 1 0 0 1 1 1z"/></svg></span>`;
+
 const ICON_FILE = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg></span>`;
 
 const ICON_BOOK_OPEN = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>`;
 
 const ICON_PEN = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19h7"/><path d="M18 2 4 16l-2 6 6-2L22 6l-4-4Z"/><path d="m9 15 3 3"/></svg></span>`;
+
+const ICON_CLOUD = `<span class="agreement-doc__icon-wrap" aria-hidden="true"><svg class="agreement-doc__icon" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg></span>`;
 
 function sectionHead(iconHtml: string, title: string): string {
   return `<div class="agreement-doc__section-head">${iconHtml}<h2>${escapeHtml(title)}</h2></div>`;
@@ -47,6 +81,8 @@ export const AGREEMENT_DOC_CSS = `
   font-size: 1.35rem; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 0.75rem;
   color: var(--agreement-heading, #3d2f2f);
 }
+.agreement-doc__subtitle { margin: 0 0 0.35rem; font-size: 0.95rem; color: var(--agreement-heading, #3d2f2f); }
+.agreement-doc__meta { margin: 0 0 1rem; font-size: 0.9rem; color: var(--agreement-text, #3d2f2f); }
 .agreement-doc__lead { margin: 0 0 0.5rem; max-width: 42rem; }
 .agreement-doc__lead + .agreement-doc__lead { margin-top: 0.85rem; }
 .agreement-doc__section {
@@ -74,12 +110,13 @@ export const AGREEMENT_DOC_CSS = `
 .agreement-doc__signed { margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--agreement-border, rgba(245, 212, 208, 0.9)); }
 `.trim();
 
-/** Core rental terms (replace with counsel-reviewed text when ready). */
 export function buildRentalAgreementBodyHtml(
   snap: RentalAgreementSnapshotV1,
   signature: Pick<RentalAgreementSignatureV1, "typedFullName" | "signedAtUtc"> | null,
 ): string {
   const feeLine = snapshotFeeLabel(snap);
+  const qty = marqueeQuantity(snap);
+  const endDateIso = addOneCalendarDayIso(snap.eventDateIso);
   const signedBlock = signature
     ? `<div class="agreement-doc__signed"><p class="agreement-doc__p"><strong>Signed electronically</strong> on ${escapeHtml(
         new Date(signature.signedAtUtc).toLocaleString("en-US", {
@@ -90,56 +127,114 @@ export function buildRentalAgreementBodyHtml(
       )} UTC as <em>${escapeHtml(signature.typedFullName)}</em>.</p></div>`
     : "";
 
-  const feeExpl = snap.totalFeeIsQuote
-    ? "This amount reflects the written quote for this configuration."
-    : "This amount reflects the estimate at the time of signing; Owner will confirm or update pricing before final payment.";
-
   const notesSection = snap.notes
-    ? `<section class="agreement-doc__section">${sectionHead(ICON_FILE, "Special notes")}<p class="agreement-doc__p">${escapeHtml(snap.notes)}</p></section>`
+    ? `<section class="agreement-doc__section">${sectionHead(ICON_FILE, "Special notes (booking)")}<p class="agreement-doc__p">${escapeHtml(snap.notes)}</p></section>`
     : "";
 
+  const setupIncluded = snap.addressSummary.trim().toUpperCase() !== "LOCAL PICKUP";
+
   return `<div class="agreement-doc">
-<h1 class="agreement-doc__title">Marquee rental agreement</h1>
-<p class="agreement-doc__lead">This Rental Agreement (&ldquo;Agreement&rdquo;) is between <strong>Lux Marquee</strong> (&ldquo;Owner&rdquo;) and
-<strong>${escapeHtml(snap.contactName)}</strong> (&ldquo;Renter&rdquo;), email ${escapeHtml(snap.contactEmail)}.</p>
+<h1 class="agreement-doc__title">Rental Agreement</h1>
+<p class="agreement-doc__subtitle"><strong>${escapeHtml(LESSOR_LEGAL_NAME)}</strong></p>
+<p class="agreement-doc__meta"><a href="mailto:${escapeHtml(LESSOR_EMAIL)}">${escapeHtml(LESSOR_EMAIL)}</a></p>
+
+<p class="agreement-doc__lead">This Rental Agreement is entered into on <strong>${escapeHtml(
+    formatDisplayDate(snap.eventDateIso),
+  )}</strong> by and between ${escapeHtml(LESSOR_LEGAL_NAME)} (&ldquo;Lessor&rdquo;) and
+<strong>${escapeHtml(snap.contactName)}</strong> (&ldquo;Lessee&rdquo;), at email ${escapeHtml(snap.contactEmail)}.</p>
 
 <section class="agreement-doc__section">
-${sectionHead(ICON_CALENDAR, "Event")}
+${sectionHead(ICON_SPARKLES, "1. Rental items")}
+<p class="agreement-doc__p">Lessor agrees to rent the following marquee items to Lessee:</p>
 <ul class="agreement-doc__list">
-  <li><strong>Event type:</strong> ${escapeHtml(snap.eventTypeLabel)}</li>
-  <li><strong>Date:</strong> ${escapeHtml(formatDisplayDate(snap.eventDateIso))}</li>
-  <li><strong>Arrival / display time (local):</strong> ${escapeHtml(snap.eventTimeLocal)}</li>
-  <li><strong>Location:</strong> ${escapeHtml(snap.addressSummary)}</li>
-  <li><strong>Setup:</strong> ${escapeHtml(snap.setupLabel)}</li>
+  <li><strong>Description:</strong> ${escapeHtml(snap.lettering)}</li>
+  <li><strong>Quantity:</strong> ${qty} (letter / number pieces as described)</li>
+  <li><strong>Condition:</strong> All items are free of damage and in working order at time of delivery.</li>
 </ul>
 </section>
 
 <section class="agreement-doc__section">
-${sectionHead(ICON_SPARKLES, "Rental items")}
-<p class="agreement-doc__p">Renter is renting the illuminated letter display described as: <strong>${escapeHtml(
-    snap.lettering,
-  )}</strong>.</p>
-<p class="agreement-doc__p agreement-doc__p--tight">Rental is subject to inventory availability and to safe installation conditions at the venue.</p>
+${sectionHead(ICON_CALENDAR, "2. Rental period")}
+<ul class="agreement-doc__list">
+  <li><strong>Start date:</strong> ${escapeHtml(formatDisplayDate(snap.eventDateIso))}</li>
+  <li><strong>End date (typical return window):</strong> ${escapeHtml(formatDisplayDate(endDateIso))} — exact pickup/return may be adjusted in writing with Lessor.</li>
+  <li><strong>Pickup / delivery time (local):</strong> ${escapeHtml(formatDisplayDate(snap.eventDateIso))} by ${escapeHtml(formatTime12h(snap.eventTimeLocal))}</li>
+  <li><strong>Return / pickup time:</strong> Coordinated with Lessor (often the following calendar day by 3:00 pm local time unless arranged otherwise).</li>
+</ul>
 </section>
 
 <section class="agreement-doc__section">
-${sectionHead(ICON_BANKNOTE, "Fees")}
-<p class="agreement-doc__p">Total rental fee for this booking: <strong>${escapeHtml(feeLine)}</strong>.</p>
-<p class="agreement-doc__p agreement-doc__p--tight">${escapeHtml(feeExpl)}</p>
-<p class="agreement-doc__p agreement-doc__p--tight">Deposit and balance terms follow separate communications and invoices.</p>
+${sectionHead(ICON_BANKNOTE, "3. Rental fee &amp; payment")}
+<ul class="agreement-doc__list">
+  <li><strong>Total rental fee:</strong> ${escapeHtml(feeLine)}. A non-refundable deposit (commonly $100 toward the calendar hold) applies as stated in your quote or booking communications.</li>
+  <li><strong>Final payment due:</strong> One week prior to the event unless otherwise agreed in writing.</li>
+  <li><strong>Accepted payment methods:</strong> Cash, Venmo @luxmarquee, or check (as confirmed by Lessor).</li>
+</ul>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_TRUCK, "4. Delivery &amp; setup")}
+<ul class="agreement-doc__list">
+  <li><strong>Delivery address / venue:</strong> ${escapeHtml(snap.addressSummary)}</li>
+  <li><strong>Setup included:</strong> ${setupIncluded ? "Yes (per this booking and quote)" : "Pickup / client-arranged transport — confirm details with Lessor."}</li>
+  <li><strong>Setup type:</strong> ${escapeHtml(snap.setupLabel)}</li>
+</ul>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_SHIELD, "5. Damage, loss, or theft")}
+<p class="agreement-doc__p">Lessee is responsible for any damage, loss, or theft of marquee items during the rental period.</p>
+<ul class="agreement-doc__list">
+  <li><strong>Replacement cost per letter/number:</strong> $350</li>
+  <li><strong>Damage assessment:</strong> Conducted upon pickup/return.</li>
+  <li>Letters cannot be moved after setup by ${escapeHtml(LESSOR_SHORT)}.</li>
+  <li>Balloons may be attached using hooks on the back of letters; do not use tape on the painted portion of letters.</li>
+  <li>Letters must be set up and left on the ground. Letters cannot be placed above doorways or in places that could fall. ${escapeHtml(
+    LESSOR_SHORT,
+  )} is not liable for any injury due to letters. Letters cannot be moved once set in place by ${escapeHtml(LESSOR_SHORT)}.</li>
+</ul>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_BOOK_OPEN, "6. Cancellations &amp; refunds")}
+<ul class="agreement-doc__list">
+  <li>Cancellations made 45 days in advance receive a full refund (excluding deposit).</li>
+  <li>No refunds for same-day cancellations or no-shows.</li>
+</ul>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_BOOK_OPEN, "7. Limitation of liability")}
+<p class="agreement-doc__p">Lessor is not liable for injury or damage arising from use of rental items. Lessee assumes full responsibility upon possession.</p>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_BOOK_OPEN, "8. Governing law")}
+<p class="agreement-doc__p">This Agreement shall be governed by the laws of the State of Missouri.</p>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_BOOK_OPEN, "9. Entire agreement")}
+<p class="agreement-doc__p">This document contains the full agreement between both parties. Any changes must be made in writing and signed by both parties.</p>
+</section>
+
+<section class="agreement-doc__section">
+${sectionHead(ICON_CLOUD, "10. Weather policy")}
+<p class="agreement-doc__p">For safety reasons and to prevent damage to rental items:</p>
+<p class="agreement-doc__p agreement-doc__p--tight">If winds exceed 20 mph, or if there is active rain or a forecasted chance of rain, ${escapeHtml(
+    LESSOR_SHORT,
+  )} will not set up letters or numbers outdoors.</p>
+<p class="agreement-doc__p agreement-doc__p--tight">In such cases, the client may:</p>
+<ul class="agreement-doc__list">
+  <li>Relocate the setup to a suitable indoor venue, or</li>
+  <li>Reschedule the rental for a later date, subject to availability.</li>
+</ul>
+<p class="agreement-doc__p agreement-doc__p--tight">${escapeHtml(
+    LESSOR_SHORT,
+  )} reserves the right to make the final decision regarding weather-related setup restrictions. No refunds will be issued due to weather unless otherwise agreed in writing.</p>
 </section>
 
 ${notesSection}
-
-<section class="agreement-doc__section">
-${sectionHead(ICON_BOOK_OPEN, "General terms")}
-<p class="agreement-doc__p">Renter will provide reasonable access and a safe area for delivery, setup, and pickup.</p>
-<p class="agreement-doc__p">Renter is responsible for venue permissions and any location fees.</p>
-<p class="agreement-doc__p">Owner may refuse service if conditions are unsafe or materially different from what was disclosed.</p>
-<p class="agreement-doc__p">Cancellation and weather policies communicated by Owner apply.</p>
-<p class="agreement-doc__p agreement-doc__p--spaced">This Agreement is governed by the laws applicable where Owner operates.</p>
-<p class="agreement-doc__p">If any part of this Agreement is unenforceable, the remainder stays in effect.</p>
-</section>
 
 <section class="agreement-doc__section">
 ${sectionHead(ICON_PEN, "Electronic signature")}

@@ -19,6 +19,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { RentalAgreementAdminPanel } from "@/components/RentalAgreementAdminPanel";
+import { isPayByCheckVenmoHandle } from "@/lib/payment-preference";
 import { buildVenmoChargeUrl, depositAmountDollars } from "@/lib/venmo-deposit";
 
 type Submission = {
@@ -509,6 +510,12 @@ function SubmittedPaymentSummary({
           placeholder="@client"
           disabled={disabled}
         />
+        {isPayByCheckVenmoHandle(venmoDraft) ? (
+          <p className="mt-1 text-[9px] font-medium normal-case leading-snug text-amber-900/90">
+            Client chose <strong>pay by check</strong> on the request form. Replace with a Venmo @handle
+            here if they pay deposit by Venmo instead.
+          </p>
+        ) : null}
       </label>
     </div>
   );
@@ -1066,18 +1073,21 @@ export function AdminDashboard() {
     const venmo = d?.venmo?.trim();
     if (!venmo) {
       alert(
-        `Add the client's Venmo @handle in the field below, then try again. (We'll save your proposed $ and handle for you.)`,
+        `Add the client's Venmo @handle in the field below, or if they pay by check, the sheet should show PAY_BY_CHECK from the request form. (We'll save your proposed $ and handle for you.)`,
       );
       depositInFlight.current.delete(id);
       return;
     }
     setActionBusy((b) => ({ ...b, [id]: "deposit" }));
     try {
-      const upfrontVenmoUrl = buildVenmoChargeUrl(
-        venmo,
-        DEPOSIT_USD,
-        `Marquee deposit (${sub.letteringRaw.slice(0, 60)})`,
-      );
+      const payByCheck = isPayByCheckVenmoHandle(venmo);
+      const upfrontVenmoUrl = payByCheck
+        ? null
+        : buildVenmoChargeUrl(
+            venmo,
+            DEPOSIT_USD,
+            `Marquee deposit (${sub.letteringRaw.slice(0, 60)})`,
+          );
 
       const patchRes = await fetch(`/api/admin/submissions/${id}`, {
         method: "PATCH",
@@ -1104,7 +1114,8 @@ export function AdminDashboard() {
       });
       const depositParsed = await parseJsonBody<{
         submission?: Submission;
-        venmoUrl?: string;
+        venmoUrl?: string | null;
+        payByCheck?: boolean;
         depositAmountDollars?: number;
       }>(res, "deposit request");
       if (!depositParsed.ok) {
@@ -1114,9 +1125,16 @@ export function AdminDashboard() {
       if (depositParsed.data.submission) {
         applyServerSubmission(depositParsed.data.submission);
       }
-      const venmoUrl = depositParsed.data.venmoUrl || upfrontVenmoUrl;
-      openVenmoUrl(venmoUrl);
-      showCardFeedback(id, "Deposit requested — sheet updated (Venmo opened)");
+      const venmoUrl = depositParsed.data.venmoUrl ?? upfrontVenmoUrl ?? null;
+      if (venmoUrl) {
+        openVenmoUrl(venmoUrl);
+        showCardFeedback(id, "Deposit requested — sheet updated (Venmo opened)");
+      } else {
+        showCardFeedback(
+          id,
+          "Deposit requested — client pays by check; follow up off Venmo (sheet updated)",
+        );
+      }
     } finally {
       depositInFlight.current.delete(id);
       setActionBusy((b) => {
@@ -1232,6 +1250,10 @@ export function AdminDashboard() {
     const venmo = d?.venmo?.trim();
     if (!venmo) {
       alert("Add the client's Venmo @handle first.");
+      return;
+    }
+    if (isPayByCheckVenmoHandle(venmo)) {
+      alert("This client pays by check — collect the balance outside Venmo or save a Venmo @handle first.");
       return;
     }
     const proposed = proposedCentsForSub(sub, d?.proposed ?? "");

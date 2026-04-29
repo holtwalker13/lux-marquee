@@ -158,6 +158,8 @@ export function QuoteQuestionnaire() {
   const [contactName, setContactName] = useState("");
   const [contactEmail, setContactEmail] = useState("");
   const [contactPhone, setContactPhone] = useState("");
+  const [clientVenmoUsername, setClientVenmoUsername] = useState("");
+  const [payViaCheck, setPayViaCheck] = useState(false);
   const [consent, setConsent] = useState(false);
   const [honeypot, setHoneypot] = useState("");
 
@@ -372,12 +374,23 @@ export function QuoteQuestionnaire() {
     return { hasSchedule, hasLettering };
   }, [eventDate, addressComplete, letteringFormatOk, pickupOnly]);
 
+  const paymentOk = useMemo(() => {
+    if (payViaCheck) return true;
+    return clientVenmoUsername.replace(/^@+/, "").trim().length >= 2;
+  }, [payViaCheck, clientVenmoUsername]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
     if (honeypot.trim() !== "") return;
     if (!consent) {
       setFormError("Please agree to be contacted about your quote.");
+      return;
+    }
+    if (!paymentOk) {
+      setFormError(
+        "Enter your Venmo username (without @ is fine) or check Pay via check so we know how you’ll pay the deposit.",
+      );
       return;
     }
     setSubmitting(true);
@@ -403,6 +416,8 @@ export function QuoteQuestionnaire() {
           notes,
           consentAccepted: consent,
           website: honeypot,
+          clientVenmoUsername,
+          payViaCheck,
         }),
       });
       const raw = await res.text();
@@ -859,6 +874,59 @@ export function QuoteQuestionnaire() {
               className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
             />
           </label>
+
+          <div className="rounded-2xl border border-[var(--blush)] bg-[var(--cream)]/50 p-4 sm:col-span-2">
+            <span className="mb-2 block text-sm font-semibold text-[var(--cocoa)]">
+              Deposit payment <span className="text-rose-700">*</span>
+            </span>
+            <p className="mb-3 text-sm text-[var(--cocoa-muted)]">
+              We need one of these so we can follow up on the deposit.
+            </p>
+            <label className="block">
+              <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                Your Venmo username
+              </span>
+              <input
+                type="text"
+                inputMode="text"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={clientVenmoUsername}
+                disabled={payViaCheck}
+                onChange={(e) => {
+                  setClientVenmoUsername(e.target.value);
+                  if (e.target.value.trim()) setPayViaCheck(false);
+                }}
+                placeholder="luxmarquee-client"
+                className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              <span className="mt-1 block text-xs text-[var(--cocoa-muted)]">
+                @ is optional — we’ll use this when we request the deposit on Venmo.
+              </span>
+            </label>
+            <label className="mt-4 flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={payViaCheck}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setPayViaCheck(on);
+                  if (on) setClientVenmoUsername("");
+                }}
+                className="mt-1 size-5 rounded border-[var(--blush)] text-[var(--coral)] focus:ring-[var(--coral)]"
+              />
+              <span>
+                <span className="block text-sm font-semibold text-[var(--cocoa)]">
+                  I’ll pay via check
+                </span>
+                <span className="mt-0.5 block text-xs text-[var(--cocoa-muted)]">
+                  Checks are due 7 days prior to your event.
+                </span>
+              </span>
+            </label>
+          </div>
+
           <label className="flex cursor-pointer items-start gap-3 sm:col-span-2">
             <input
               type="checkbox"
@@ -889,7 +957,9 @@ export function QuoteQuestionnaire() {
           </button>
           <button
             type="submit"
-            disabled={submitting || !letteringFormatOk || !hasSchedule || !consent}
+            disabled={
+              submitting || !letteringFormatOk || !hasSchedule || !consent || !paymentOk
+            }
             className="rounded-2xl bg-[var(--coral)] px-8 py-4 text-lg font-bold text-white shadow-lg shadow-[#e07a6e]/35 transition hover:-translate-y-0.5 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? "Sending…" : "Submit request"}

@@ -4,6 +4,7 @@ import {
   buildVenmoDepositUrl,
   depositAmountDollars,
 } from "@/lib/venmo-deposit";
+import { isPayByCheckVenmoHandle } from "@/lib/payment-preference";
 import {
   findSubmissionById,
   sheetSubmissionToApiJson,
@@ -31,6 +32,8 @@ export async function POST(_req: Request, ctx: Ctx) {
     );
   }
 
+  const payByCheck = isPayByCheckVenmoHandle(handle);
+
   if (
     sub.pipelineStatus === "booked" ||
     sub.pipelineStatus === "cancelled" ||
@@ -43,7 +46,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
 
   const note = `Marquee deposit (${sub.letteringRaw.slice(0, 80)})`;
-  const venmoUrl = buildVenmoDepositUrl(handle, note);
+  const venmoUrl = payByCheck ? null : buildVenmoDepositUrl(handle, note);
 
   const updated = await updateSubmission(id, (p) => ({
     ...p,
@@ -58,6 +61,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   return NextResponse.json({
     submission: sheetSubmissionToApiJson(updated),
     venmoUrl,
+    payByCheck,
     depositAmountDollars: depositAmountDollars(),
   });
 }

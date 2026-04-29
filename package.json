@@ -15,11 +15,14 @@
   },
   "dependencies": {
     "googleapis": "^171.4.0",
+    "html-to-text": "^9.0.5",
     "ics": "^3.9.0",
     "jose": "^6.2.2",
     "lucide-react": "^1.8.0",
     "luxon": "^3.7.2",
     "next": "16.2.1",
+    "pdf-lib": "^1.17.1",
+    "pdfkit": "^0.18.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "resend": "^6.9.4"
@@ -27,8 +30,10 @@
   "devDependencies": {
     "@netlify/plugin-nextjs": "^5.15.9",
     "@tailwindcss/postcss": "^4",
+    "@types/html-to-text": "^9.0.4",
     "@types/luxon": "^3.7.1",
     "@types/node": "^20",
+    "@types/pdfkit": "^0.17.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "dotenv": "^17.3.1",

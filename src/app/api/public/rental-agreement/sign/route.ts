@@ -8,6 +8,7 @@ import {
   type RentalAgreementSignatureV1,
 } from "@/lib/rental-agreement-metadata";
 import { sendSignedRentalAgreementEmails } from "@/lib/send-rental-agreement-email";
+import { absoluteUrl } from "@/lib/public-request-origin";
 import { findSubmissionById, updateSubmission } from "@/lib/submissions-sheets-store";
 import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 
@@ -101,10 +102,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Could not save signature." }, { status: 500 });
   }
 
+  const signedPdfDownloadUrl = absoluteUrl(
+    req,
+    `/api/public/rental-agreement/download?token=${encodeURIComponent(token)}`,
+  ).toString();
+
   const emailResult = await sendSignedRentalAgreementEmails({
     clientEmail: sub.contactEmail,
     clientName: sub.contactName,
     signature: record,
+    signedPdfDownloadUrl,
   });
 
   return NextResponse.json({

@@ -164,9 +164,11 @@ export function SignRentalAgreementClient() {
           </p>
           <a
             href={downloadHref}
+            target="_blank"
+            rel="noopener noreferrer"
             className="inline-flex items-center justify-center rounded-2xl bg-[var(--coral)] px-4 py-2 text-sm font-bold text-white"
           >
-            Download a copy (HTML)
+            Download signed PDF
           </a>
           {submitOk?.emailSent === false && submitOk.emailNote ? (
             <p className="text-xs text-emerald-900/80">{submitOk.emailNote}</p>

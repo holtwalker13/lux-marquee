@@ -23,6 +23,7 @@ import {
   createNewSubmissionId,
 } from "@/lib/submissions-sheets-store";
 import type { SheetSubmission } from "@/lib/submission-sheet-schema";
+import { SHEET_VENMO_PAY_BY_CHECK } from "@/lib/payment-preference";
 
 const EVENT_TYPES = new Set(["wedding", "baby_shower", "birthday", "other"]);
 
@@ -43,6 +44,8 @@ type Body = {
   setupOutdoor?: boolean;
   consentAccepted?: boolean;
   website?: string;
+  clientVenmoUsername?: string;
+  payViaCheck?: boolean;
 };
 
 function isValidEmail(s: string): boolean {
@@ -87,6 +90,9 @@ export async function POST(req: Request) {
   const pickupOnly = /^\d{1,4}$/.test(normalized);
   const consentAccepted = Boolean(body.consentAccepted);
   const setupOutdoor = Boolean(body.setupOutdoor);
+  const payViaCheck = Boolean(body.payViaCheck);
+  const clientVenmoUsername = String(body.clientVenmoUsername ?? "").trim();
+  const venmoNormalized = clientVenmoUsername.replace(/^@+/, "").trim();
 
   const eventAddressLine1 = String(body.eventAddressLine1 ?? "").trim();
   const eventAddressLine2Raw = body.eventAddressLine2 != null
@@ -132,6 +138,15 @@ export async function POST(req: Request) {
   if (!consentAccepted) {
     return NextResponse.json(
       { error: "Please agree to be contacted about your quote." },
+      { status: 400 },
+    );
+  }
+  if (!payViaCheck && venmoNormalized.length < 2) {
+    return NextResponse.json(
+      {
+        error:
+          "Enter your Venmo username (without @ is fine) or check Pay via check so we know how you’ll pay the deposit.",
+      },
       { status: 400 },
     );
   }
@@ -221,6 +236,7 @@ export async function POST(req: Request) {
       travelSurchargeApplies: outsideServiceRadius,
       outdoorSetupPremium: pickupOnly ? false : setupOutdoor,
       pickupOnly,
+      intakePayment: payViaCheck ? "check" : "venmo",
     });
 
     const id = createNewSubmissionId();
@@ -254,7 +270,7 @@ export async function POST(req: Request) {
       consentAccepted: true,
       pipelineStatus: "pending_request",
       proposedAmountCents: null,
-      venmoHandle: null,
+      venmoHandle: payViaCheck ? SHEET_VENMO_PAY_BY_CHECK : venmoNormalized || null,
       depositRequestedAt: null,
       depositPaidAt: null,
       bookingConfirmedAt: null,
