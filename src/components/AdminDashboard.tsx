@@ -2324,10 +2324,7 @@ export function AdminDashboard() {
               {confirmBookingConflict?.status === "blocked" ? (
                 <button
                   type="button"
-                  disabled={
-                    actionBusy[confirmBookingIntent.id] === "book" ||
-                    confirmBookingConflict?.status === "checking"
-                  }
+                  disabled={actionBusy[confirmBookingIntent.id] === "book"}
                   onClick={() => {
                     const target = confirmBookingIntent;
                     void (async () => {
