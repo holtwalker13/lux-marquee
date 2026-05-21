@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAdminSession } from "@/lib/admin-request";
 import { parseMoneyToCents } from "@/lib/money-parse";
+import { releaseReservationsForSubmission } from "@/lib/reservations";
 import {
   sheetSubmissionToApiJson,
   updateSubmission,
@@ -128,6 +129,14 @@ export async function PATCH(req: Request, ctx: Ctx) {
 
   if (!updated) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
+
+  if (pipelineStatus === "cancelled") {
+    try {
+      await releaseReservationsForSubmission(id);
+    } catch (releaseErr) {
+      console.error("[admin/submissions PATCH] release reservations", releaseErr);
+    }
   }
 
   return NextResponse.json({ submission: sheetSubmissionToApiJson(updated) });

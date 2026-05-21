@@ -28,6 +28,13 @@ function tokensFromSegment(seg: string): string[] {
   return out;
 }
 
+/** Parses a LetterReservations column C value (A–Z, THE, etc.). */
+export function parseReservationLetterKey(raw: string): string | null {
+  const k = raw.trim().toUpperCase();
+  if (!k) return null;
+  return isInventorySheetKey(k) ? k : null;
+}
+
 /** Inventory / reservation keys allowed in the Inventory sheet column A. */
 export function isInventorySheetKey(key: string): boolean {
   const k = key.trim().toUpperCase();

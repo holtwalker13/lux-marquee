@@ -5,6 +5,7 @@ import {
   normalizeLettering,
   validateLetteringNormalized,
 } from "@/lib/pricing";
+import { CheckCircle2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const EVENT_OPTIONS: { value: string; label: string; emoji: string }[] = [
@@ -165,7 +166,7 @@ export function QuoteQuestionnaire() {
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ id: string } | null>(null);
+  const [success, setSuccess] = useState(false);
 
   const normalizedPreview = useMemo(
     () => normalizeLettering(debouncedLettering),
@@ -449,7 +450,7 @@ export function QuoteQuestionnaire() {
         return;
       }
       if (data.id) {
-        setSuccess({ id: data.id });
+        setSuccess(true);
       }
     } catch {
       setFormError("Network error. Check your connection and try again.");
@@ -460,16 +461,23 @@ export function QuoteQuestionnaire() {
 
   if (success) {
     return (
-      <div className="mx-auto max-w-lg rounded-3xl border border-[var(--blush)] bg-[var(--card)] p-10 text-center shadow-lg shadow-[#c4a59a]/15">
-        <p className="font-[family-name:var(--font-display)] text-3xl font-medium text-[var(--cocoa)]">
+      <div
+        className="mx-auto max-w-lg rounded-3xl border border-[var(--blush)] bg-[var(--card)] px-10 py-12 text-center shadow-lg shadow-[#c4a59a]/15"
+        role="status"
+        aria-live="polite"
+      >
+        <div
+          className="mx-auto flex size-20 items-center justify-center rounded-full bg-gradient-to-br from-[var(--blush)] via-[var(--cream)] to-[var(--card)] ring-4 ring-[var(--blush)]/40"
+          aria-hidden
+        >
+          <CheckCircle2 className="size-11 text-[var(--coral)]" strokeWidth={1.75} />
+        </div>
+        <p className="mt-6 font-[family-name:var(--font-display)] text-3xl font-medium text-[var(--cocoa)]">
           You’re all set!
         </p>
-        <p className="mt-4 text-lg text-[var(--cocoa-muted)]">
-          We’ve received your request. We’ll get back to you soon with a
-          personalized quote by email.
-        </p>
-        <p className="mt-6 text-sm text-[var(--cocoa-muted)]">
-          Reference: <code className="rounded bg-[var(--cream)] px-2 py-0.5">{success.id}</code>
+        <p className="mx-auto mt-4 max-w-sm text-lg leading-relaxed text-[var(--cocoa-muted)]">
+          We’ve received your request and will email you a personalized quote
+          soon.
         </p>
       </div>
     );

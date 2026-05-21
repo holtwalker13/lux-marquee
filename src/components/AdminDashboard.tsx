@@ -55,7 +55,19 @@ type RequestStage = "new_inquiry" | "quote_sent" | "deposit_requested" | "deposi
 type BookingTaskKey = "calendarCreated" | "welcomeSent" | "contractSent" | "balancePaid";
 type BookingTasks = Record<BookingTaskKey, boolean>;
 type CancelIntent = { id: string; label: string } | null;
-type ConfirmBookingIntent = { id: string; clientName: string } | null;
+type ConfirmBookingIntent = {
+  id: string;
+  clientName: string;
+  letteringRaw: string;
+  letteringNormalized: string;
+  eventDate: string;
+  eventTimeLocal: string;
+} | null;
+type ConfirmBookingConflict =
+  | { status: "checking" }
+  | { status: "blocked"; issues: AvailabilityIssueJson[] }
+  | { status: "error"; message: string }
+  | null;
 type ConfirmBookingSuccess = {
   id: string;
   clientName: string;
@@ -298,9 +310,50 @@ function depositReceivedForRequest(sub: Submission, stage: RequestStage): boolea
   );
 }
 
+type AvailabilityIssueJson = {
+  letter: string;
+  needed: number;
+  available: number;
+  inUse: number;
+};
+
 type ParseResult<T> =
   | { ok: true; data: T }
-  | { ok: false; message: string };
+  | { ok: false; message: string; issues?: AvailabilityIssueJson[] };
+
+function parseAvailabilityIssues(value: unknown): AvailabilityIssueJson[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: AvailabilityIssueJson[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.letter !== "string" || typeof o.needed !== "number") continue;
+    out.push({
+      letter: o.letter,
+      needed: o.needed,
+      available: typeof o.available === "number" ? o.available : 0,
+      inUse: typeof o.inUse === "number" ? o.inUse : 0,
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function glyphLabelForIssue(letter: string): string {
+  if (letter === "0/O") return "0 or O";
+  return `“${letter}”`;
+}
+
+function describeIssueForAdmin(issue: AvailabilityIssueJson): string {
+  const stock = issue.available + issue.inUse;
+  const g = glyphLabelForIssue(issue.letter);
+  if (issue.needed > stock) {
+    return `This sign needs ${issue.needed}× ${g}, but you only have ${stock}× in inventory.`;
+  }
+  if (issue.inUse > 0) {
+    return `This sign needs ${issue.needed}× ${g}. You have ${stock}× in stock; ${issue.inUse} already booked on this date — only ${issue.available} left.`;
+  }
+  return `This sign needs ${issue.needed}× ${g}, but only ${issue.available} available on this date.`;
+}
 
 async function parseJsonBody<T>(res: Response, label: string): Promise<ParseResult<T>> {
   const text = await res.text();
@@ -319,7 +372,7 @@ async function parseJsonBody<T>(res: Response, label: string): Promise<ParseResu
       message: `${label} returned non-JSON (HTTP ${res.status}). The route may have crashed or returned an HTML error page.`,
     };
   }
-  const obj = data as T & { error?: string; details?: string };
+  const obj = data as T & { error?: string; details?: string; issues?: unknown };
   if (!res.ok) {
     const msg =
       typeof obj.error === "string" && obj.error.trim()
@@ -330,6 +383,7 @@ async function parseJsonBody<T>(res: Response, label: string): Promise<ParseResu
     return {
       ok: false,
       message: details ? `${msg}\n\n${details}` : msg,
+      issues: parseAvailabilityIssues(obj.issues),
     };
   }
   return { ok: true, data: obj as T };
@@ -847,6 +901,8 @@ export function AdminDashboard() {
   const [cancelIntent, setCancelIntent] = useState<CancelIntent>(null);
   const [confirmBookingIntent, setConfirmBookingIntent] =
     useState<ConfirmBookingIntent>(null);
+  const [confirmBookingConflict, setConfirmBookingConflict] =
+    useState<ConfirmBookingConflict>(null);
   const [confirmBookingSuccess, setConfirmBookingSuccess] =
     useState<ConfirmBookingSuccess>(null);
   const [editingProposedById, setEditingProposedById] = useState<Record<string, boolean>>({});
@@ -998,6 +1054,57 @@ export function AdminDashboard() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!confirmBookingIntent) {
+      setConfirmBookingConflict(null);
+      return;
+    }
+    const { letteringNormalized, eventDate, eventTimeLocal } = confirmBookingIntent;
+    let cancelled = false;
+    setConfirmBookingConflict({ status: "checking" });
+    void (async () => {
+      try {
+        const params = new URLSearchParams({
+          phrase: letteringNormalized,
+          date: eventDate,
+          time: eventTimeLocal || "12:00",
+        });
+        const res = await fetch(`/api/admin/availability?${params}`);
+        const parsed = await parseJsonBody<{
+          ok?: boolean;
+          issues?: AvailabilityIssueJson[];
+          error?: string;
+        }>(res, "availability check");
+        if (cancelled) return;
+        if (!parsed.ok) {
+          setConfirmBookingConflict({
+            status: "error",
+            message: parsed.message,
+          });
+          return;
+        }
+        if (parsed.data.ok === false && parsed.data.issues?.length) {
+          setConfirmBookingConflict({
+            status: "blocked",
+            issues: parsed.data.issues,
+          });
+          return;
+        }
+        setConfirmBookingConflict(null);
+      } catch {
+        if (!cancelled) {
+          setConfirmBookingConflict({
+            status: "error",
+            message: "Could not check letter availability. Try again in a moment.",
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [confirmBookingIntent]);
 
   async function logout() {
     await fetch("/api/admin/logout", { method: "POST" });
@@ -1201,12 +1308,14 @@ export function AdminDashboard() {
     }
   }
 
-  async function confirmBooking(id: string) {
+  async function confirmBooking(id: string, bookAnyway = false): Promise<boolean> {
     const preConfirmSub = submissions.find((s) => s.id === id) ?? null;
     setActionBusy((b) => ({ ...b, [id]: "book" }));
     try {
       const res = await fetch(`/api/admin/submissions/${id}/confirm-booking`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bookAnyway }),
       });
       const parsed = await parseJsonBody<{
         submission?: Submission;
@@ -1215,9 +1324,17 @@ export function AdminDashboard() {
         ics?: string;
       }>(res, "confirm booking");
       if (!parsed.ok) {
-        alert(parsed.message);
-        return;
+        if (parsed.issues?.length) {
+          setConfirmBookingConflict({ status: "blocked", issues: parsed.issues });
+        } else {
+          setConfirmBookingConflict({
+            status: "error",
+            message: parsed.message,
+          });
+        }
+        return false;
       }
+      setConfirmBookingConflict(null);
       if (parsed.data.submission) {
         applyServerSubmission(parsed.data.submission);
       } else {
@@ -1235,7 +1352,11 @@ export function AdminDashboard() {
           googleCalendarUrl: buildGoogleCalendarUrl(confirmed),
         });
       }
-      showCardFeedback(id, "Booking confirmed.");
+      showCardFeedback(
+        id,
+        bookAnyway ? "Booked (inventory was short — add letters before the event)" : "Booking confirmed.",
+      );
+      return true;
     } finally {
       setActionBusy((b) => {
         const n = { ...b };
@@ -1401,13 +1522,24 @@ export function AdminDashboard() {
             Pipeline, deposits, and letter holds (±12h around event time).
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void logout()}
-          className="ml-auto rounded-full border border-[var(--blush)] px-4 py-2 text-sm font-semibold text-[var(--cocoa)]"
-        >
-          Log out
-        </button>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <a
+            href="/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--blush)] px-4 py-2 text-sm font-semibold text-[var(--cocoa)] hover:bg-[var(--cream)]"
+          >
+            Booking page
+            <ExternalLink className="size-3.5 opacity-70" aria-hidden />
+          </a>
+          <button
+            type="button"
+            onClick={() => void logout()}
+            className="rounded-full border border-[var(--blush)] px-4 py-2 text-sm font-semibold text-[var(--cocoa)]"
+          >
+            Log out
+          </button>
+        </div>
       </header>
 
       <section className="rounded-2xl border border-[var(--blush)] bg-[var(--card)] p-4">
@@ -1497,6 +1629,10 @@ export function AdminDashboard() {
                       setConfirmBookingIntent({
                         id: sub.id,
                         clientName: sub.contactName,
+                        letteringRaw: sub.letteringRaw,
+                        letteringNormalized: sub.letteringNormalized,
+                        eventDate: sub.eventDate,
+                        eventTimeLocal: sub.eventTimeLocal,
                       }),
                     disabled: false,
                   };
@@ -2137,24 +2273,94 @@ export function AdminDashboard() {
               </span>{" "}
               as booked and try to automatically open an iPhone-compatible calendar event.
             </p>
-            <div className="mt-4 flex justify-end gap-2">
+            <p className="mt-3 text-xs font-medium uppercase tracking-wide text-[var(--cocoa-muted)]">
+              Sign lettering
+            </p>
+            <div className="mt-1">
+              <LetteringTiles text={confirmBookingIntent.letteringRaw} />
+            </div>
+            {confirmBookingConflict?.status === "checking" ? (
+              <p className="mt-3 text-sm text-[var(--cocoa-muted)]">
+                Checking letter inventory for this date…
+              </p>
+            ) : null}
+            {confirmBookingConflict?.status === "error" ? (
+              <div
+                className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950"
+                role="alert"
+              >
+                {confirmBookingConflict.message}
+              </div>
+            ) : null}
+            {confirmBookingConflict?.status === "blocked" ? (
+              <div
+                className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-3 text-sm text-rose-950"
+                role="alert"
+              >
+                <p className="font-semibold">Can&apos;t confirm — not enough letters</p>
+                <ul className="mt-2 list-disc space-y-1.5 pl-5">
+                  {confirmBookingConflict.issues.map((issue) => (
+                    <li key={issue.letter}>{describeIssueForAdmin(issue)}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs text-rose-800/90">
+                  If you&apos;re picking up or making more letters before the event, you can
+                  still book this job.
+                </p>
+              </div>
+            ) : null}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setConfirmBookingIntent(null)}
-                className="rounded-lg border border-[var(--blush)] px-3 py-2 text-sm font-semibold text-[var(--cocoa)]"
+                disabled={actionBusy[confirmBookingIntent.id] === "book"}
+                onClick={() => {
+                  setConfirmBookingIntent(null);
+                  setConfirmBookingConflict(null);
+                }}
+                className="rounded-lg border border-[var(--blush)] px-3 py-2 text-sm font-semibold text-[var(--cocoa)] disabled:opacity-50"
               >
                 Not yet
               </button>
+              {confirmBookingConflict?.status === "blocked" ? (
+                <button
+                  type="button"
+                  disabled={
+                    actionBusy[confirmBookingIntent.id] === "book" ||
+                    confirmBookingConflict?.status === "checking"
+                  }
+                  onClick={() => {
+                    const target = confirmBookingIntent;
+                    void (async () => {
+                      const ok = await confirmBooking(target.id, true);
+                      if (ok) setConfirmBookingIntent(null);
+                    })();
+                  }}
+                  className="rounded-lg border-2 border-amber-500 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-950 disabled:opacity-60"
+                >
+                  {actionBusy[confirmBookingIntent.id] === "book"
+                    ? "Booking…"
+                    : "Book anyway"}
+                </button>
+              ) : null}
               <button
                 type="button"
+                disabled={
+                  actionBusy[confirmBookingIntent.id] === "book" ||
+                  confirmBookingConflict?.status === "checking" ||
+                  confirmBookingConflict?.status === "blocked"
+                }
                 onClick={() => {
                   const target = confirmBookingIntent;
-                  setConfirmBookingIntent(null);
-                  void confirmBooking(target.id);
+                  void (async () => {
+                    const ok = await confirmBooking(target.id);
+                    if (ok) setConfirmBookingIntent(null);
+                  })();
                 }}
-                className="rounded-lg bg-[var(--coral)] px-3 py-2 text-sm font-bold text-white"
+                className="rounded-lg bg-[var(--coral)] px-3 py-2 text-sm font-bold text-white disabled:opacity-60"
               >
-                Yes, confirm booking
+                {actionBusy[confirmBookingIntent.id] === "book"
+                  ? "Confirming…"
+                  : "Yes, confirm booking"}
               </button>
             </div>
           </div>

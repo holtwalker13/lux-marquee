@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { requireAdminSession } from "@/lib/admin-request";
 import { sendBookingInviteEmail } from "@/lib/calendar-invite";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
+import { describeAvailabilityRejection } from "@/lib/availability-messages";
 import {
-  AvailabilityConflictError,
   checkLetterAvailability,
   createReservationsForSubmission,
 } from "@/lib/reservations";
@@ -15,9 +15,17 @@ import {
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export async function POST(_req: Request, ctx: Ctx) {
+export async function POST(req: Request, ctx: Ctx) {
   if (!(await requireAdminSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let bookAnyway = false;
+  try {
+    const body = (await req.json()) as { bookAnyway?: unknown };
+    bookAnyway = body.bookAnyway === true;
+  } catch {
+    bookAnyway = false;
   }
 
   const { id } = await ctx.params;
@@ -58,55 +66,76 @@ export async function POST(_req: Request, ctx: Ctx) {
     );
   }
 
-  const check = await checkLetterAvailability(
-    sub.letteringNormalized,
-    sub.eventStartAt,
-    inventory,
-  );
-  if (!check.ok) {
+  try {
+    if (!bookAnyway) {
+      const check = await checkLetterAvailability(
+        sub.letteringNormalized,
+        sub.eventStartAt,
+        inventory,
+      );
+      if (!check.ok) {
+        return NextResponse.json(
+          {
+            error: describeAvailabilityRejection(check.issues),
+            issues: check.issues,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
+    await createReservationsForSubmission(
+      sub.id,
+      sub.letteringNormalized,
+      sub.eventStartAt,
+      inventory,
+      { bookAnyway },
+    );
+    await updateSubmission(id, (p) => ({
+      ...p,
+      pipelineStatus: "booked",
+      bookingConfirmedAt: new Date(),
+    }));
+
+    const refreshed = await findSubmissionById(id);
+    if (!refreshed) {
+      return NextResponse.json({ error: "Not found after update." }, { status: 500 });
+    }
+
+    const addressSummary = [
+      sub.eventAddressLine1,
+      [sub.eventCity, sub.eventState, sub.eventPostalCode].filter(Boolean).join(", "),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const emailResult = await sendBookingInviteEmail({
+      eventStartUtc: sub.eventStartAt,
+      clientEmail: sub.contactEmail,
+      lettering: sub.letteringRaw,
+      addressSummary,
+    });
+
+    return NextResponse.json({
+      submission: sheetSubmissionToApiJson(refreshed),
+      calendarEmailSent: emailResult.sent,
+      calendarEmailNote: emailResult.reason,
+      ics: emailResult.ics,
+      bookedDespiteInventory: bookAnyway,
+    });
+  } catch (e) {
+    console.error("[confirm-booking]", e);
+    const msg = e instanceof Error ? e.message : "Confirm booking failed.";
+    const quota =
+      msg.includes("Quota exceeded") || msg.includes("RESOURCE_EXHAUSTED");
     return NextResponse.json(
       {
-        error: new AvailabilityConflictError(check.issues).message,
-        issues: check.issues,
+        error: quota
+          ? "Google Sheets is rate-limited. Wait a minute and try again."
+          : msg,
+        details: process.env.NODE_ENV !== "production" ? msg : undefined,
       },
-      { status: 409 },
+      { status: quota ? 503 : 500 },
     );
   }
-
-  await createReservationsForSubmission(
-    sub.id,
-    sub.letteringNormalized,
-    sub.eventStartAt,
-  );
-  await updateSubmission(id, (p) => ({
-    ...p,
-    pipelineStatus: "booked",
-    bookingConfirmedAt: new Date(),
-  }));
-
-  const refreshed = await findSubmissionById(id);
-  if (!refreshed) {
-    return NextResponse.json({ error: "Not found after update." }, { status: 500 });
-  }
-
-  const addressSummary = [
-    sub.eventAddressLine1,
-    [sub.eventCity, sub.eventState, sub.eventPostalCode].filter(Boolean).join(", "),
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const emailResult = await sendBookingInviteEmail({
-    eventStartUtc: sub.eventStartAt,
-    clientEmail: sub.contactEmail,
-    lettering: sub.letteringRaw,
-    addressSummary,
-  });
-
-  return NextResponse.json({
-    submission: sheetSubmissionToApiJson(refreshed),
-    calendarEmailSent: emailResult.sent,
-    calendarEmailNote: emailResult.reason,
-    ics: emailResult.ics,
-  });
 }

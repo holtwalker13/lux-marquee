@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireAdminSession } from "@/lib/admin-request";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
-import { fetchAllReservationsFromSheet, isGoogleSheetsConfigured } from "@/lib/google-sheets";
+import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 import { buildWeekendInventoryTickerMessage } from "@/lib/weekend-inventory-ticker";
+import { loadReservationsWithExpiredReleased } from "@/lib/reservations";
 
 export async function GET() {
   if (!(await requireAdminSession())) {
@@ -17,7 +18,7 @@ export async function GET() {
 
     let weekendTicker: string | null = null;
     try {
-      const reservations = await fetchAllReservationsFromSheet();
+      const reservations = await loadReservationsWithExpiredReleased();
       weekendTicker = buildWeekendInventoryTickerMessage(totals, reservations);
     } catch (tickerErr) {
       console.error("[admin/inventory GET] weekend ticker", tickerErr);

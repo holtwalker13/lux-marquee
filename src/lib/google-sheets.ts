@@ -3,7 +3,10 @@ import {
   SUBMIT_REQUEST_COL_COUNT,
   SUBMIT_REQUEST_HEADERS,
 } from "@/lib/submission-sheet-schema";
-import { isInventorySheetKey } from "@/lib/letter-inventory-tokens";
+import {
+  isInventorySheetKey,
+  parseReservationLetterKey,
+} from "@/lib/letter-inventory-tokens";
 
 export { SUBMIT_REQUEST_HEADERS };
 
@@ -27,20 +30,32 @@ export function isGoogleSheetsConfigured(): boolean {
   );
 }
 
+/** Avoid repeated spreadsheets.get (60 read req/min quota) per tab check. */
+const knownSpreadsheetTabs = new Map<string, Set<string>>();
+
 async function ensureSpreadsheetTab(
   sheets: ReturnType<typeof google.sheets>,
   spreadsheetId: string,
   title: string,
 ): Promise<void> {
-  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
-  const exists = spreadsheet.data.sheets?.some((s) => s.properties?.title === title);
-  if (exists) return;
+  let tabs = knownSpreadsheetTabs.get(spreadsheetId);
+  if (!tabs) {
+    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
+    tabs = new Set(
+      spreadsheet.data.sheets
+        ?.map((s) => s.properties?.title)
+        .filter((t): t is string => Boolean(t)) ?? [],
+    );
+    knownSpreadsheetTabs.set(spreadsheetId, tabs);
+  }
+  if (tabs.has(title)) return;
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
       requests: [{ addSheet: { properties: { title } } }],
     },
   });
+  tabs.add(title);
 }
 
 function pendingTabName(): string {
@@ -432,15 +447,12 @@ export async function fetchAllReservationsFromSheet(): Promise<SheetReservationR
   for (const row of rows) {
     const id = String(row[0] ?? "").trim();
     const submissionId = String(row[1] ?? "").trim();
-    const letter = String(row[2] ?? "")
-      .trim()
-      .toUpperCase()
-      .slice(0, 1);
+    const letter = parseReservationLetterKey(String(row[2] ?? ""));
     const qty = Number(row[3]);
     const ws = String(row[4] ?? "").trim();
     const we = String(row[5] ?? "").trim();
     const status = String(row[6] ?? "active").trim() || "active";
-    if (!id || !submissionId || !letter) continue;
+    if (!id || !submissionId || letter == null) continue;
     const windowStart = new Date(ws);
     const windowEnd = new Date(we);
     if (Number.isNaN(windowStart.getTime()) || Number.isNaN(windowEnd.getTime())) continue;
@@ -476,4 +488,51 @@ export async function appendReservationRows(rows: string[][]): Promise<void> {
     valueInputOption: "USER_ENTERED",
     requestBody: { values: rows },
   });
+}
+
+/** Mark reservation rows released (column G) by reservation_id. */
+export async function updateReservationStatusesInSheet(
+  updates: { reservationId: string; status: string }[],
+): Promise<number> {
+  if (updates.length === 0) return 0;
+
+  const sheetId = process.env.GOOGLE_SHEET_ID?.trim();
+  const auth = getJwtAuth();
+  if (!sheetId || !auth) throw new Error("Google Sheets is not configured.");
+
+  const sheets = google.sheets({ version: "v4", auth });
+  await auth.authorize();
+  const tab = reservationsTabName();
+  await ensureSpreadsheetTab(sheets, sheetId, tab);
+  await ensureLetterReservationsHeaderRowFor(sheets, sheetId, tab);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${tab}!A2:H5000`,
+  });
+  const rows = res.data.values ?? [];
+  const byId = new Map(updates.map((u) => [u.reservationId, u.status]));
+  const data: { range: string; values: string[][] }[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const id = String(row[0] ?? "").trim();
+    const nextStatus = byId.get(id);
+    if (!nextStatus) continue;
+    data.push({
+      range: `${tab}!G${i + 2}`,
+      values: [[nextStatus]],
+    });
+  }
+
+  if (data.length === 0) return 0;
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: sheetId,
+    requestBody: {
+      valueInputOption: "USER_ENTERED",
+      data,
+    },
+  });
+  return data.length;
 }
