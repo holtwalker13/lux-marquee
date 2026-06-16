@@ -8,6 +8,27 @@ export const SERVICE_BASE = {
 /** Travel surcharge threshold (miles). */
 export const SERVICE_RADIUS_MILES = 15;
 
+/** Furthest one-way drive we quote for (hours). */
+export const MAX_DRIVE_HOURS = 2;
+
+/** Typical road speed for drive-time estimates. */
+export const AVERAGE_DRIVE_MPH = 55;
+
+/**
+ * Straight-line → road miles (calibrated so St. Louis ≈ 2 hr from Jackson).
+ */
+export const ROAD_DISTANCE_FACTOR = 1.22;
+
+/** Rough one-way drive time from Jackson, MO. */
+export function estimatedDriveHours(haversineMiles: number): number {
+  const hours = (haversineMiles * ROAD_DISTANCE_FACTOR) / AVERAGE_DRIVE_MPH;
+  return Math.round(hours * 10) / 10;
+}
+
+export function isWithinMaxDrive(haversineMiles: number): boolean {
+  return estimatedDriveHours(haversineMiles) <= MAX_DRIVE_HOURS + 0.05;
+}
+
 const EARTH_RADIUS_MILES = 3958.7613;
 
 function toRad(d: number): number {

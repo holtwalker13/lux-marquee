@@ -5,7 +5,7 @@ import {
   normalizeLettering,
   validateLetteringNormalized,
 } from "@/lib/pricing";
-import { SERVICE_RADIUS_MILES } from "@/lib/service-area";
+import { MAX_DRIVE_HOURS, SERVICE_RADIUS_MILES } from "@/lib/service-area";
 import { SERVICE_TOWNS } from "@/lib/service-towns";
 import { TownCombobox } from "@/components/TownCombobox";
 import { CheckCircle2 } from "lucide-react";
@@ -32,6 +32,8 @@ type LocationPreview =
   | {
       status: "ok";
       distanceMiles: number;
+      estimatedDriveHours: number;
+      maxDriveHours: number;
       outsideServiceRadius: boolean;
       serviceRadiusMiles: number;
       baseLabel: string;
@@ -61,6 +63,8 @@ export function QuoteQuestionnaire() {
     return {
       status: "ok",
       distanceMiles: selectedTown.distanceMiles,
+      estimatedDriveHours: selectedTown.estimatedDriveHours,
+      maxDriveHours: MAX_DRIVE_HOURS,
       outsideServiceRadius: selectedTown.outsideServiceRadius,
       serviceRadiusMiles: SERVICE_RADIUS_MILES,
       baseLabel: "Jackson, MO",
@@ -380,7 +384,7 @@ export function QuoteQuestionnaire() {
         <p className="mt-1 text-[var(--cocoa-muted)]">
           {pickupOnly
             ? "Local pickup order — tell us when you need it and your contact details."
-            : "When’s the big day, and where should we deliver & set up? Pick the nearest town — we estimate travel from Jackson, MO."}
+            : "When’s the big day, and where should we deliver & set up? We serve within about a 2-hour drive of Jackson, MO."}
         </p>
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <div className="grid gap-4 sm:col-span-2 sm:grid-cols-2">
@@ -426,8 +430,8 @@ export function QuoteQuestionnaire() {
                   onChange={setEventTownId}
                 />
                 <span className="mt-1 block text-[11px] text-[var(--cocoa-muted)]">
-                  Type to search or use the arrow to browse. Distance is an estimate from the
-                  town center to our studio in Jackson, MO.
+                  Type to search or use the arrow to browse. Towns are limited to about a{" "}
+                  {MAX_DRIVE_HOURS}-hour drive from our studio in Jackson, MO.
                 </span>
               </label>
               <label className="block sm:col-span-2">
@@ -505,7 +509,10 @@ export function QuoteQuestionnaire() {
               {locationPreview.status === "ok" && (
                 <div className="space-y-2 text-[var(--cocoa)]">
                   <p>
-                    <span className="font-semibold">About {locationPreview.distanceMiles} mi</span>{" "}
+                    <span className="font-semibold">
+                      About {locationPreview.distanceMiles} mi (~{locationPreview.estimatedDriveHours}{" "}
+                      hr drive)
+                    </span>{" "}
                     from {locationPreview.baseLabel}
                     {locationPreview.outsideServiceRadius ? (
                       <span className="text-[var(--cocoa-muted)]">
@@ -521,8 +528,9 @@ export function QuoteQuestionnaire() {
                     )}
                   </p>
                   <p className="text-xs text-[var(--cocoa-muted)]">
-                    Based on {locationPreview.matchedLabel} town center. Your exact venue may be a
-                    little closer or farther.
+                    Based on {locationPreview.matchedLabel} town center (max ~
+                    {locationPreview.maxDriveHours}-hour drive). Your exact venue may be a little
+                    closer or farther.
                   </p>
                 </div>
               )}

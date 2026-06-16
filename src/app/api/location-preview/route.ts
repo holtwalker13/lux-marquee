@@ -33,6 +33,8 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     distanceMiles: preview.distanceMiles,
+    estimatedDriveHours: preview.estimatedDriveHours,
+    maxDriveHours: preview.maxDriveHours,
     outsideServiceRadius: preview.outsideServiceRadius,
     serviceRadiusMiles: preview.serviceRadiusMiles,
     baseLabel: preview.baseLabel,

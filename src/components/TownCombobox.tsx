@@ -12,8 +12,16 @@ type TownComboboxProps = {
   required?: boolean;
 };
 
+function formatDriveLabel(hours: number): string {
+  if (hours < 1) {
+    const mins = Math.max(5, Math.round(hours * 60));
+    return `~${mins} min`;
+  }
+  return `~${hours} hr`;
+}
+
 function townOptionLabel(town: ServiceTown): string {
-  return `${town.label} (~${town.distanceMiles} mi)`;
+  return `${town.label} · ${formatDriveLabel(town.estimatedDriveHours)}`;
 }
 
 export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
@@ -207,7 +215,10 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
                   }`}
                 >
                   <span className="font-medium">{town.label}</span>
-                  <span className="text-[var(--cocoa-muted)]"> · ~{town.distanceMiles} mi</span>
+                  <span className="text-[var(--cocoa-muted)]">
+                    {" "}
+                    · {formatDriveLabel(town.estimatedDriveHours)}
+                  </span>
                 </li>
               );
             })

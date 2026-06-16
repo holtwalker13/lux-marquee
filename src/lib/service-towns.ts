@@ -1,8 +1,11 @@
 import {
+  MAX_DRIVE_HOURS,
   SERVICE_BASE,
   SERVICE_RADIUS_MILES,
+  estimatedDriveHours,
   haversineMiles,
   isOutsideServiceRadius,
+  isWithinMaxDrive,
 } from "@/lib/service-area";
 
 /** Approximate town/city center for travel estimates from Jackson, MO. */
@@ -15,6 +18,7 @@ export type ServiceTown = {
   lat: number;
   lon: number;
   distanceMiles: number;
+  estimatedDriveHours: number;
   outsideServiceRadius: boolean;
 };
 
@@ -74,7 +78,12 @@ const SERVICE_TOWN_SEEDS: ServiceTownSeed[] = [
   { id: "metropolis_il", city: "Metropolis", state: "IL", postalCode: "62960", lat: 37.1512, lon: -88.732 },
   { id: "wickliffe_ky", city: "Wickliffe", state: "KY", postalCode: "42087", lat: 36.9648, lon: -89.089 },
   { id: "paducah_ky", city: "Paducah", state: "KY", postalCode: "42001", lat: 37.0834, lon: -88.6001 },
+  { id: "st_louis_mo", city: "St. Louis", state: "MO", postalCode: "63101", lat: 38.627, lon: -90.1994 },
 ];
+
+const SERVICE_TOWN_SEEDS_IN_RANGE = SERVICE_TOWN_SEEDS.filter((seed) =>
+  isWithinMaxDrive(haversineMiles({ lat: seed.lat, lon: seed.lon }, SERVICE_BASE)),
+);
 
 function buildTown(seed: ServiceTownSeed): ServiceTown {
   const distanceMiles =
@@ -88,11 +97,12 @@ function buildTown(seed: ServiceTownSeed): ServiceTown {
     lat: seed.lat,
     lon: seed.lon,
     distanceMiles,
+    estimatedDriveHours: estimatedDriveHours(distanceMiles),
     outsideServiceRadius: isOutsideServiceRadius(distanceMiles),
   };
 }
 
-export const SERVICE_TOWNS: ServiceTown[] = SERVICE_TOWN_SEEDS.map(buildTown).sort(
+export const SERVICE_TOWNS: ServiceTown[] = SERVICE_TOWN_SEEDS_IN_RANGE.map(buildTown).sort(
   (a, b) => a.distanceMiles - b.distanceMiles || a.label.localeCompare(b.label),
 );
 
@@ -104,6 +114,8 @@ export function getServiceTownById(id: string): ServiceTown | null {
 
 export function getServiceTownDistancePreview(townId: string): {
   distanceMiles: number;
+  estimatedDriveHours: number;
+  maxDriveHours: number;
   outsideServiceRadius: boolean;
   serviceRadiusMiles: number;
   baseLabel: string;
@@ -113,6 +125,8 @@ export function getServiceTownDistancePreview(townId: string): {
   if (!town) return null;
   return {
     distanceMiles: town.distanceMiles,
+    estimatedDriveHours: town.estimatedDriveHours,
+    maxDriveHours: MAX_DRIVE_HOURS,
     outsideServiceRadius: town.outsideServiceRadius,
     serviceRadiusMiles: SERVICE_RADIUS_MILES,
     baseLabel: SERVICE_BASE.label,

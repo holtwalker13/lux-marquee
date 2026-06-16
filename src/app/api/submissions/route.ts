@@ -8,8 +8,10 @@ import {
 } from "@/lib/pricing";
 import { computePriceTableVersion } from "@/lib/pricing-version";
 import {
+  MAX_DRIVE_HOURS,
   SERVICE_BASE,
   SERVICE_RADIUS_MILES,
+  estimatedDriveHours,
 } from "@/lib/service-area";
 import { getServiceTownById } from "@/lib/service-towns";
 import { ensurePriceGlyphsFromSheet, loadActivePriceMap } from "@/lib/ensure-price-glyphs";
@@ -203,6 +205,8 @@ export async function POST(req: Request) {
     const metadata = buildMetadata({
       travelTownId: pickupOnly ? null : eventTownId,
       travelTownLabel,
+      maxDriveHours: MAX_DRIVE_HOURS,
+      estimatedDriveHours: distanceRounded != null ? estimatedDriveHours(distanceRounded) : null,
       serviceBaseLabel: SERVICE_BASE.label,
       serviceRadiusMiles: SERVICE_RADIUS_MILES,
       travelSurchargeApplies: outsideServiceRadius,
