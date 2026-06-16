@@ -5,7 +5,7 @@ See [README.md](../README.md) for env vars. **Google Sheets:** all persistence; 
 ## Public
 
 - `POST /api/submissions` — quote request; optional append to Google Sheet tab `SubmitRequests`.
-- `POST /api/location-preview` — address → distance from Jackson, MO.
+- `POST /api/location-preview` — town id → estimated distance from Jackson, MO.
 - `GET /api/prices` — glyph prices (internal/future use).
 
 ## Admin (cookie session after `POST /api/admin/login`)

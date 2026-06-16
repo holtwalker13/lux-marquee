@@ -5,8 +5,11 @@ import {
   normalizeLettering,
   validateLetteringNormalized,
 } from "@/lib/pricing";
+import { SERVICE_RADIUS_MILES } from "@/lib/service-area";
+import { SERVICE_TOWNS } from "@/lib/service-towns";
+import { TownCombobox } from "@/components/TownCombobox";
 import { CheckCircle2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const EVENT_OPTIONS: { value: string; label: string; emoji: string }[] = [
   { value: "wedding", label: "Wedding", emoji: "💒" },
@@ -26,7 +29,6 @@ function useDebouncedValue<T>(value: T, ms: number): T {
 
 type LocationPreview =
   | { status: "idle" }
-  | { status: "loading" }
   | {
       status: "ok";
       distanceMiles: number;
@@ -34,86 +36,7 @@ type LocationPreview =
       serviceRadiusMiles: number;
       baseLabel: string;
       matchedLabel: string;
-    }
-  | { status: "error"; message: string };
-
-type PlaceComponent = {
-  long_name?: string;
-  short_name?: string;
-  types?: string[];
-};
-
-type PlaceResult = {
-  address_components?: PlaceComponent[];
-  formatted_address?: string;
-};
-
-type PlacesListener = { remove?: () => void };
-
-type PlacesAutocomplete = {
-  addListener: (eventName: string, handler: () => void) => PlacesListener;
-  getPlace: () => PlaceResult;
-};
-
-type PlacesAutocompleteCtor = new (
-  input: HTMLInputElement,
-  options: {
-    types?: string[];
-    fields?: string[];
-    componentRestrictions?: { country: string | string[] };
-  },
-) => PlacesAutocomplete;
-
-type GoogleMapsLike = {
-  maps?: {
-    places?: { Autocomplete?: PlacesAutocompleteCtor };
-    event?: { removeListener: (listener: PlacesListener) => void };
-  };
-};
-
-declare global {
-  interface Window {
-    google?: GoogleMapsLike;
-    __googlePlacesLoader?: Promise<void>;
-  }
-}
-
-function loadGooglePlaces(apiKey: string): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  if (window.google?.maps?.places) return Promise.resolve();
-  if (window.__googlePlacesLoader) return window.__googlePlacesLoader;
-
-  window.__googlePlacesLoader = new Promise<void>((resolve, reject) => {
-    const existing = document.getElementById("google-places-script");
-    if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error("Google Places failed to load.")), {
-        once: true,
-      });
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = "google-places-script";
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places`;
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Google Places failed to load."));
-    document.head.appendChild(script);
-  });
-
-  return window.__googlePlacesLoader;
-}
-
-function placeAddressPart(
-  components: PlaceComponent[],
-  type: string,
-  short = false,
-): string {
-  const part = components.find((c) => (c.types ?? []).includes(type));
-  if (!part) return "";
-  return short ? String(part.short_name ?? "") : String(part.long_name ?? "");
-}
+    };
 
 export function QuoteQuestionnaire() {
   const [screen, setScreen] = useState<1 | 2>(1);
@@ -122,39 +45,28 @@ export function QuoteQuestionnaire() {
   const [eventTime, setEventTime] = useState("17:00");
   const [eventAddressLine1, setEventAddressLine1] = useState("");
   const [eventAddressLine2, setEventAddressLine2] = useState("");
-  const [eventCity, setEventCity] = useState("");
-  const [eventState, setEventState] = useState("");
-  const [eventPostalCode, setEventPostalCode] = useState("");
+  const [eventTownId, setEventTownId] = useState("");
   const [setupOutdoor, setSetupOutdoor] = useState(false);
   const [notes, setNotes] = useState("");
   const [lettering, setLettering] = useState("");
   const debouncedLettering = useDebouncedValue(lettering, 200);
 
-  const addressKey = useMemo(
-    () =>
-      JSON.stringify({
-        l1: eventAddressLine1.trim(),
-        l2: eventAddressLine2.trim(),
-        city: eventCity.trim(),
-        state: eventState.trim().toUpperCase(),
-        zip: eventPostalCode.trim(),
-      }),
-    [
-      eventAddressLine1,
-      eventAddressLine2,
-      eventCity,
-      eventState,
-      eventPostalCode,
-    ],
+  const selectedTown = useMemo(
+    () => SERVICE_TOWNS.find((town) => town.id === eventTownId) ?? null,
+    [eventTownId],
   );
-  const debouncedAddressKey = useDebouncedValue(addressKey, 650);
 
-  const [locationPreview, setLocationPreview] = useState<LocationPreview>({
-    status: "idle",
-  });
-  const [placesEnabled, setPlacesEnabled] = useState(false);
-  const addressInputRef = useRef<HTMLInputElement | null>(null);
-  const autocompleteRef = useRef<PlacesAutocomplete | null>(null);
+  const locationPreview = useMemo((): LocationPreview => {
+    if (!selectedTown) return { status: "idle" };
+    return {
+      status: "ok",
+      distanceMiles: selectedTown.distanceMiles,
+      outsideServiceRadius: selectedTown.outsideServiceRadius,
+      serviceRadiusMiles: SERVICE_RADIUS_MILES,
+      baseLabel: "Jackson, MO",
+      matchedLabel: selectedTown.label,
+    };
+  }, [selectedTown]);
 
   const [contactName, setContactName] = useState("");
   const [contactEmail, setContactEmail] = useState("");
@@ -201,173 +113,8 @@ export function QuoteQuestionnaire() {
   }, [normalizedPreview.length, letteringValidation]);
 
   const addressComplete = useMemo(() => {
-    const st = eventState.trim().toUpperCase();
-    return (
-      Boolean(eventAddressLine1.trim()) &&
-      Boolean(eventCity.trim()) &&
-      st.length === 2 &&
-      Boolean(eventPostalCode.trim())
-    );
-  }, [
-    eventAddressLine1,
-    eventCity,
-    eventState,
-    eventPostalCode,
-  ]);
-
-  useEffect(() => {
-    let parts: {
-      l1: string;
-      l2: string;
-      city: string;
-      state: string;
-      zip: string;
-    };
-    try {
-      parts = JSON.parse(debouncedAddressKey) as typeof parts;
-    } catch {
-      setLocationPreview({ status: "idle" });
-      return;
-    }
-
-    const l1 = parts.l1?.trim() ?? "";
-    const l2 = parts.l2?.trim() ?? "";
-    const city = parts.city?.trim() ?? "";
-    const state = parts.state?.trim().toUpperCase() ?? "";
-    const zip = parts.zip?.trim() ?? "";
-
-    if (!l1 || !city || state.length !== 2 || !zip) {
-      setLocationPreview({ status: "idle" });
-      return;
-    }
-
-    let cancelled = false;
-    setLocationPreview({ status: "loading" });
-
-    (async () => {
-      try {
-        const res = await fetch("/api/location-preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            line1: l1,
-            line2: l2 || undefined,
-            city,
-            state,
-            postalCode: zip,
-            website: "",
-          }),
-        });
-        const data = (await res.json()) as {
-          error?: string;
-          distanceMiles?: number;
-          outsideServiceRadius?: boolean;
-          serviceRadiusMiles?: number;
-          baseLabel?: string;
-          matchedLabel?: string;
-        };
-        if (cancelled) return;
-        if (!res.ok) {
-          setLocationPreview({
-            status: "error",
-            message: data.error ?? "Could not verify address.",
-          });
-          return;
-        }
-        if (
-          data.distanceMiles == null ||
-          data.outsideServiceRadius == null ||
-          data.serviceRadiusMiles == null ||
-          !data.baseLabel ||
-          !data.matchedLabel
-        ) {
-          setLocationPreview({
-            status: "error",
-            message: "Unexpected response. Try again.",
-          });
-          return;
-        }
-        setLocationPreview({
-          status: "ok",
-          distanceMiles: data.distanceMiles,
-          outsideServiceRadius: data.outsideServiceRadius,
-          serviceRadiusMiles: data.serviceRadiusMiles,
-          baseLabel: data.baseLabel,
-          matchedLabel: data.matchedLabel,
-        });
-      } catch {
-        if (!cancelled) {
-          setLocationPreview({
-            status: "error",
-            message: "Network error checking the address.",
-          });
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedAddressKey]);
-
-  useEffect(() => {
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim();
-    const input = addressInputRef.current;
-    if (!apiKey || !input) return;
-
-    let cancelled = false;
-    let listener: PlacesListener | null = null;
-
-    void loadGooglePlaces(apiKey)
-      .then(() => {
-        if (cancelled || !addressInputRef.current || autocompleteRef.current) return;
-        const g = window.google;
-        if (!g?.maps?.places?.Autocomplete) return;
-
-        const ac = new g.maps.places.Autocomplete(addressInputRef.current, {
-          types: ["address"],
-          fields: ["address_components", "formatted_address"],
-          componentRestrictions: { country: "us" },
-        });
-        autocompleteRef.current = ac;
-        setPlacesEnabled(true);
-
-        listener = ac.addListener("place_changed", () => {
-          const place = ac.getPlace();
-          const comps = Array.isArray(place?.address_components)
-            ? place.address_components
-            : [];
-          const streetNumber = placeAddressPart(comps, "street_number");
-          const route = placeAddressPart(comps, "route");
-          const city =
-            placeAddressPart(comps, "locality") ||
-            placeAddressPart(comps, "postal_town") ||
-            placeAddressPart(comps, "sublocality");
-          const state = placeAddressPart(comps, "administrative_area_level_1", true);
-          const zip = placeAddressPart(comps, "postal_code");
-          const zipSuffix = placeAddressPart(comps, "postal_code_suffix");
-
-          const street = [streetNumber, route].filter(Boolean).join(" ").trim();
-          if (street) setEventAddressLine1(street);
-          if (city) setEventCity(city);
-          if (state) setEventState(state.toUpperCase().slice(0, 2));
-          if (zip) {
-            setEventPostalCode(zipSuffix ? `${zip}-${zipSuffix}` : zip);
-          }
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setPlacesEnabled(false);
-      });
-
-    return () => {
-      cancelled = true;
-      if (listener && window.google?.maps?.event?.removeListener) {
-        window.google.maps.event.removeListener(listener);
-      }
-      autocompleteRef.current = null;
-    };
-  }, []);
+    return Boolean(eventAddressLine1.trim()) && Boolean(eventTownId);
+  }, [eventAddressLine1, eventTownId]);
 
   const { hasSchedule, hasLettering } = useMemo(() => {
     const hasSchedule = Boolean(eventDate) && (pickupOnly || addressComplete);
@@ -409,9 +156,10 @@ export function QuoteQuestionnaire() {
           eventTime,
           eventAddressLine1: pickupOnly ? "" : eventAddressLine1,
           eventAddressLine2: pickupOnly ? "" : eventAddressLine2,
-          eventCity: pickupOnly ? "" : eventCity,
-          eventState: pickupOnly ? "" : eventState.trim().toUpperCase().slice(0, 2),
-          eventPostalCode: pickupOnly ? "" : eventPostalCode,
+          eventTownId: pickupOnly ? "" : eventTownId,
+          eventCity: pickupOnly ? "" : selectedTown?.city ?? "",
+          eventState: pickupOnly ? "" : selectedTown?.state ?? "",
+          eventPostalCode: pickupOnly ? "" : selectedTown?.postalCode ?? "",
           setupOutdoor: pickupOnly ? false : setupOutdoor,
           lettering,
           notes,
@@ -632,7 +380,7 @@ export function QuoteQuestionnaire() {
         <p className="mt-1 text-[var(--cocoa-muted)]">
           {pickupOnly
             ? "Local pickup order — tell us when you need it and your contact details."
-            : "When’s the big day, and where should we deliver & set up? We measure distance from Jackson, MO to plan travel."}
+            : "When’s the big day, and where should we deliver & set up? Pick the nearest town — we estimate travel from Jackson, MO."}
         </p>
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <div className="grid gap-4 sm:col-span-2 sm:grid-cols-2">
@@ -665,27 +413,35 @@ export function QuoteQuestionnaire() {
           {!pickupOnly ? (
             <div className="sm:col-span-2">
             <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
-              Event venue address
+              Event venue
             </span>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block sm:col-span-2">
                 <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                  Street address
+                  Nearest town or city
+                </span>
+                <TownCombobox
+                  required
+                  value={eventTownId}
+                  onChange={setEventTownId}
+                />
+                <span className="mt-1 block text-[11px] text-[var(--cocoa-muted)]">
+                  Type to search or use the arrow to browse. Distance is an estimate from the
+                  town center to our studio in Jackson, MO.
+                </span>
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
+                  Venue name or street address
                 </span>
                 <input
-                  ref={addressInputRef}
                   required
                   value={eventAddressLine1}
                   onChange={(e) => setEventAddressLine1(e.target.value)}
                   autoComplete="street-address"
-                  placeholder="123 Main St"
+                  placeholder="e.g. The Venue at Willow Creek or 123 Main St"
                   className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
                 />
-                {placesEnabled ? (
-                  <span className="mt-1 block text-[11px] text-[var(--cocoa-muted)]">
-                    Suggestions powered by Google Places.
-                  </span>
-                ) : null}
               </label>
               <label className="block sm:col-span-2">
                 <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
@@ -699,51 +455,6 @@ export function QuoteQuestionnaire() {
                   className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
                 />
               </label>
-              <label className="block">
-                <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                  City
-                </span>
-                <input
-                  required
-                  value={eventCity}
-                  onChange={(e) => setEventCity(e.target.value)}
-                  autoComplete="address-level2"
-                  className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
-                />
-              </label>
-              <div className="grid grid-cols-2 gap-4">
-                <label className="block">
-                  <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                    State
-                  </span>
-                  <input
-                    required
-                    value={eventState}
-                    onChange={(e) =>
-                      setEventState(e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2))
-                    }
-                    autoComplete="address-level1"
-                    inputMode="text"
-                    maxLength={2}
-                    placeholder="MO"
-                    className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 uppercase text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
-                    ZIP
-                  </span>
-                  <input
-                    required
-                    value={eventPostalCode}
-                    onChange={(e) => setEventPostalCode(e.target.value)}
-                    autoComplete="postal-code"
-                    inputMode="numeric"
-                    placeholder="63755"
-                    className="w-full rounded-2xl border border-[var(--blush)] bg-white px-4 py-3 text-[var(--cocoa)] outline-none ring-[var(--coral)] focus:ring-2"
-                  />
-                </label>
-              </div>
             </div>
             </div>
           ) : null}
@@ -786,22 +497,11 @@ export function QuoteQuestionnaire() {
             </div>
           ) : null}
 
-          {!pickupOnly && addressComplete && (
+          {!pickupOnly && selectedTown && (
             <div
               className="rounded-2xl border border-[var(--blush)] bg-[var(--cream)] px-4 py-3 text-sm sm:col-span-2"
               aria-live="polite"
             >
-              {locationPreview.status === "loading" && (
-                <p className="text-[var(--cocoa-muted)]">Checking address…</p>
-              )}
-              {locationPreview.status === "idle" && (
-                <p className="text-[var(--cocoa-muted)]">
-                  Enter a full address and we’ll confirm distance from our base.
-                </p>
-              )}
-              {locationPreview.status === "error" && (
-                <p className="font-medium text-red-800">{locationPreview.message}</p>
-              )}
               {locationPreview.status === "ok" && (
                 <div className="space-y-2 text-[var(--cocoa)]">
                   <p>
@@ -821,7 +521,8 @@ export function QuoteQuestionnaire() {
                     )}
                   </p>
                   <p className="text-xs text-[var(--cocoa-muted)]">
-                    Matched: {locationPreview.matchedLabel}
+                    Based on {locationPreview.matchedLabel} town center. Your exact venue may be a
+                    little closer or farther.
                   </p>
                 </div>
               )}

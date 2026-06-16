@@ -2,10 +2,6 @@ import { NextResponse } from "next/server";
 import { isGoogleSheetsConfigured } from "@/lib/google-sheets";
 import { parseEventStartUtc } from "@/lib/event-datetime";
 import {
-  formatAddressForGeocode,
-  geocodeAddressQuery,
-} from "@/lib/geocode-nominatim";
-import {
   estimateFromPriceMap,
   formatUsd,
   normalizeLettering,
@@ -14,9 +10,8 @@ import { computePriceTableVersion } from "@/lib/pricing-version";
 import {
   SERVICE_BASE,
   SERVICE_RADIUS_MILES,
-  haversineMiles,
-  isOutsideServiceRadius,
 } from "@/lib/service-area";
+import { getServiceTownById } from "@/lib/service-towns";
 import { ensurePriceGlyphsFromSheet, loadActivePriceMap } from "@/lib/ensure-price-glyphs";
 import {
   appendSubmission,
@@ -38,6 +33,7 @@ type Body = {
   notes?: string;
   eventAddressLine1?: string;
   eventAddressLine2?: string;
+  eventTownId?: string;
   eventCity?: string;
   eventState?: string;
   eventPostalCode?: string;
@@ -98,12 +94,7 @@ export async function POST(req: Request) {
   const eventAddressLine2Raw = body.eventAddressLine2 != null
     ? String(body.eventAddressLine2).trim()
     : "";
-  const eventCity = String(body.eventCity ?? "").trim();
-  const eventState = String(body.eventState ?? "")
-    .trim()
-    .toUpperCase()
-    .slice(0, 2);
-  const eventPostalCode = String(body.eventPostalCode ?? "").trim();
+  const eventTownId = String(body.eventTownId ?? "").trim();
 
   if (!contactName) {
     return NextResponse.json({ error: "Name is required." }, { status: 400 });
@@ -151,68 +142,48 @@ export async function POST(req: Request) {
     );
   }
 
-  let hit: Awaited<ReturnType<typeof geocodeAddressQuery>> | null = null;
-  let distanceRounded = 0;
+  let eventCity = "";
+  let eventState = "";
+  let eventPostalCode = "";
+  let eventLat: number | null = null;
+  let eventLng: number | null = null;
+  let distanceRounded: number | null = null;
   let outsideServiceRadius = false;
+  let travelTownLabel: string | null = null;
 
   if (!pickupOnly) {
     if (!eventAddressLine1) {
       return NextResponse.json(
-        { error: "Street address is required." },
+        { error: "Street address or venue name is required." },
         { status: 400 },
       );
     }
-    if (!eventCity || !eventState || eventState.length !== 2) {
+    if (!eventTownId) {
       return NextResponse.json(
-        { error: "City and a 2-letter state are required." },
-        { status: 400 },
-      );
-    }
-    if (!eventPostalCode) {
-      return NextResponse.json(
-        { error: "ZIP or postal code is required." },
+        { error: "Select the town or city nearest your event." },
         { status: 400 },
       );
     }
 
-    const geoQuery = formatAddressForGeocode({
-      line1: eventAddressLine1,
-      line2: eventAddressLine2Raw || undefined,
-      city: eventCity,
-      state: eventState,
-      postalCode: eventPostalCode,
-    });
-
-    try {
-      hit = await geocodeAddressQuery(geoQuery);
-    } catch (e) {
-      console.error("[submissions POST] geocode", e);
-      return NextResponse.json(
-        {
-          error: "Address lookup failed. Try again in a moment.",
-          ...(process.env.NODE_ENV !== "production" && {
-            details: e instanceof Error ? e.message : String(e),
-          }),
-        },
-        { status: 503 },
-      );
-    }
-    if (!hit) {
+    const town = getServiceTownById(eventTownId);
+    if (!town) {
       return NextResponse.json(
         {
           error:
-            "We couldn’t verify the event address. Please check the street, city, state, and ZIP.",
+            "That town isn’t on our list. Pick the closest match or mention your town in notes.",
         },
         { status: 422 },
       );
     }
 
-    const distanceMiles = haversineMiles(
-      { lat: hit.lat, lon: hit.lon },
-      SERVICE_BASE,
-    );
-    distanceRounded = Math.round(distanceMiles * 10) / 10;
-    outsideServiceRadius = isOutsideServiceRadius(distanceMiles);
+    eventCity = town.city;
+    eventState = town.state;
+    eventPostalCode = town.postalCode;
+    eventLat = town.lat;
+    eventLng = town.lon;
+    distanceRounded = town.distanceMiles;
+    outsideServiceRadius = town.outsideServiceRadius;
+    travelTownLabel = town.label;
   }
 
   try {
@@ -230,7 +201,8 @@ export async function POST(req: Request) {
     }
 
     const metadata = buildMetadata({
-      geocodedLabel: hit?.displayName ?? null,
+      travelTownId: pickupOnly ? null : eventTownId,
+      travelTownLabel,
       serviceBaseLabel: SERVICE_BASE.label,
       serviceRadiusMiles: SERVICE_RADIUS_MILES,
       travelSurchargeApplies: outsideServiceRadius,
@@ -257,8 +229,8 @@ export async function POST(req: Request) {
       eventCity: pickupOnly ? "" : eventCity,
       eventState: pickupOnly ? "" : eventState,
       eventPostalCode: pickupOnly ? "" : eventPostalCode,
-      eventLat: hit?.lat ?? null,
-      eventLng: hit?.lon ?? null,
+      eventLat,
+      eventLng,
       distanceMilesFromBase: distanceRounded,
       outsideServiceRadius,
       setupOutdoor: pickupOnly ? false : setupOutdoor,
