@@ -4,6 +4,7 @@ import { parseEventStartUtc } from "@/lib/event-datetime";
 import {
   estimateFromPriceMap,
   formatUsd,
+  letteringForInventory,
   normalizeLettering,
 } from "@/lib/pricing";
 import { computePriceTableVersion } from "@/lib/pricing-version";
@@ -84,7 +85,7 @@ export async function POST(req: Request) {
   const eventTimeRaw = String(body.eventTime ?? "12:00").trim();
   const letteringRaw = String(body.lettering ?? "");
   const notesRaw = body.notes != null ? String(body.notes).trim() : "";
-  const normalized = normalizeLettering(letteringRaw);
+  const normalized = letteringForInventory(letteringRaw);
   const pickupOnly = /^\d{1,4}$/.test(normalized);
   const consentAccepted = Boolean(body.consentAccepted);
   const setupOutdoor = Boolean(body.setupOutdoor);

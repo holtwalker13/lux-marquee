@@ -3,6 +3,48 @@
  * Whole-word "THE" (as a physical unit) is one token; spaces split words.
  */
 
+/** Words where THE is part of the spelling, not a separate physical block. */
+const GLUED_THE_WHOLE_WORDS = new Set([
+  "THEATER",
+  "THEATRE",
+  "THEFT",
+  "THEIR",
+  "THEM",
+  "THEME",
+  "THERE",
+  "THESE",
+  "THETA",
+  "THEY",
+  "THICK",
+  "THIN",
+  "THING",
+  "THINK",
+  "THIRD",
+  "THREE",
+  "THREW",
+  "THROW",
+  "THUMB",
+  "THUMP",
+]);
+
+/**
+ * Splits glued segments like THEVESSELS → THE + VESSELS so inventory uses the
+ * preset THE block instead of counting T, H, E individually.
+ */
+export function expandGluedTheSegments(normalized: string): string {
+  return normalized
+    .split(/\s+/)
+    .filter(Boolean)
+    .flatMap((seg) => {
+      const u = seg.toUpperCase();
+      if (u.length > 3 && u.startsWith("THE") && !GLUED_THE_WHOLE_WORDS.has(u)) {
+        return ["THE", u.slice(3)];
+      }
+      return [seg];
+    })
+    .join(" ");
+}
+
 function isLatinAlphanumeric(ch: string): boolean {
   return (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
 }
@@ -52,7 +94,7 @@ export function isInventorySheetKey(key: string): boolean {
  */
 export function tokenizeInventoryGlyphs(normalized: string): string[] {
   const tokens: string[] = [];
-  const segments = normalized.split(/\s+/).filter(Boolean);
+  const segments = expandGluedTheSegments(normalized).split(/\s+/).filter(Boolean);
   for (const seg of segments) {
     tokens.push(...tokensFromSegment(seg.toUpperCase()));
   }

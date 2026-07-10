@@ -1060,13 +1060,14 @@ export function AdminDashboard() {
       setConfirmBookingConflict(null);
       return;
     }
-    const { letteringNormalized, eventDate, eventTimeLocal } = confirmBookingIntent;
+    const { letteringRaw, letteringNormalized, eventDate, eventTimeLocal } =
+      confirmBookingIntent;
     let cancelled = false;
     setConfirmBookingConflict({ status: "checking" });
     void (async () => {
       try {
         const params = new URLSearchParams({
-          phrase: letteringNormalized,
+          phrase: letteringRaw || letteringNormalized,
           date: eventDate,
           time: eventTimeLocal || "12:00",
         });
