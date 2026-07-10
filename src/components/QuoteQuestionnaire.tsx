@@ -231,6 +231,12 @@ export function QuoteQuestionnaire() {
           We’ve received your request and will email you a personalized quote
           soon.
         </p>
+        <a
+          href="/"
+          className="mt-8 inline-block rounded-2xl bg-[var(--coral)] px-6 py-3 text-base font-bold text-white shadow-lg shadow-[#e07a6e]/35 transition hover:brightness-105"
+        >
+          Back to home
+        </a>
       </div>
     );
   }
@@ -429,10 +435,6 @@ export function QuoteQuestionnaire() {
                   value={eventTownId}
                   onChange={setEventTownId}
                 />
-                <span className="mt-1 block text-[11px] text-[var(--cocoa-muted)]">
-                  Type to search or use the arrow to browse. Towns are limited to about a{" "}
-                  {MAX_DRIVE_HOURS}-hour drive from our studio in Jackson, MO.
-                </span>
               </label>
               <label className="block sm:col-span-2">
                 <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--cocoa-muted)]">
@@ -468,10 +470,6 @@ export function QuoteQuestionnaire() {
             <span className="mb-3 block text-sm font-semibold text-[var(--cocoa)]">
               Setup location
             </span>
-            <p className="mb-3 text-sm text-[var(--cocoa-muted)]">
-              Outdoor installs usually need extra labor and weather planning—we’ll
-              factor that into your quote.
-            </p>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
@@ -526,11 +524,6 @@ export function QuoteQuestionnaire() {
                         — within our usual {locationPreview.serviceRadiusMiles}-mile radius.
                       </span>
                     )}
-                  </p>
-                  <p className="text-xs text-[var(--cocoa-muted)]">
-                    Based on {locationPreview.matchedLabel} town center (max ~
-                    {locationPreview.maxDriveHours}-hour drive). Your exact venue may be a little
-                    closer or farther.
                   </p>
                 </div>
               )}

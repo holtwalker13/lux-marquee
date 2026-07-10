@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { parseEventStartUtc } from "@/lib/event-datetime";
-import { normalizeLettering } from "@/lib/pricing";
+import { letteringForInventory } from "@/lib/pricing";
 import { checkLetterAvailability } from "@/lib/reservations";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
 import { requireAdminSession } from "@/lib/admin-request";
@@ -15,7 +15,7 @@ export async function GET(req: Request) {
   const date = searchParams.get("date") ?? "";
   const time = searchParams.get("time") ?? "12:00";
 
-  const normalized = normalizeLettering(phrase);
+  const normalized = letteringForInventory(phrase);
   if (!normalized.length) {
     return NextResponse.json(
       { error: "Provide phrase= with lettering to check." },

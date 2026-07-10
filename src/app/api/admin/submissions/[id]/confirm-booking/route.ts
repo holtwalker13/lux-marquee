@@ -3,6 +3,7 @@ import { requireAdminSession } from "@/lib/admin-request";
 import { sendBookingInviteEmail } from "@/lib/calendar-invite";
 import { loadLetterInventoryTotals } from "@/lib/inventory-provider";
 import { describeAvailabilityRejection } from "@/lib/availability-messages";
+import { letteringForInventory } from "@/lib/pricing";
 import {
   checkLetterAvailability,
   createReservationsForSubmission,
@@ -66,10 +67,14 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
+  const inventoryLettering = letteringForInventory(
+    sub.letteringRaw || sub.letteringNormalized,
+  );
+
   try {
     if (!bookAnyway) {
       const check = await checkLetterAvailability(
-        sub.letteringNormalized,
+        inventoryLettering,
         sub.eventStartAt,
         inventory,
       );
@@ -86,7 +91,7 @@ export async function POST(req: Request, ctx: Ctx) {
 
     await createReservationsForSubmission(
       sub.id,
-      sub.letteringNormalized,
+      inventoryLettering,
       sub.eventStartAt,
       inventory,
       { bookAnyway },

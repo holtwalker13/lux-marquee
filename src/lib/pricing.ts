@@ -1,4 +1,4 @@
-import { tokenizeInventoryGlyphs } from "@/lib/letter-inventory-tokens";
+import { tokenizeInventoryGlyphs, expandGluedTheSegments } from "@/lib/letter-inventory-tokens";
 
 /** @see docs/PRD.md §5 — safe to import from Client Components */
 export const LETTERING_MAX_LENGTH = 48;
@@ -30,6 +30,11 @@ export function normalizeLettering(raw: string): string {
       return ch;
     })
     .join("");
+}
+
+/** Normalize lettering for inventory, pricing, and availability checks. */
+export function letteringForInventory(input: string): string {
+  return expandGluedTheSegments(normalizeLettering(input));
 }
 
 export function validateLetteringNormalized(

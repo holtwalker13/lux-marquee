@@ -28,6 +28,7 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
   const listboxId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const selectingRef = useRef(false);
 
   const selectedTown = useMemo(
     () => SERVICE_TOWNS.find((town) => town.id === value) ?? null,
@@ -70,10 +71,16 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
   }
 
   function selectTown(town: ServiceTown) {
+    selectingRef.current = false;
     onChange(town.id);
     setQuery(townOptionLabel(town));
     setIsOpen(false);
     inputRef.current?.blur();
+  }
+
+  function beginSelect(town: ServiceTown) {
+    selectingRef.current = true;
+    selectTown(town);
   }
 
   function onInputChange(next: string) {
@@ -84,18 +91,15 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
 
   function onInputFocus() {
     openList();
-    if (selectedTown) {
-      setQuery("");
-      onChange("");
-    }
   }
 
   function onInputBlur() {
     window.setTimeout(() => {
+      if (selectingRef.current) return;
       if (!rootRef.current?.contains(document.activeElement)) {
         closeList();
       }
-    }, 120);
+    }, 300);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -155,7 +159,7 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
           type="button"
           tabIndex={-1}
           aria-label={isOpen ? "Close town list" : "Show all towns"}
-          onMouseDown={(e) => e.preventDefault()}
+          onPointerDown={(e) => e.preventDefault()}
           onClick={() => {
             if (isOpen) {
               closeList();
@@ -205,10 +209,12 @@ export function TownCombobox({ value, onChange, required }: TownComboboxProps) {
                   id={`${listboxId}-option-${town.id}`}
                   role="option"
                   aria-selected={isSelected}
-                  onMouseDown={(e) => e.preventDefault()}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    beginSelect(town);
+                  }}
                   onMouseEnter={() => setHighlightedIndex(index)}
-                  onClick={() => selectTown(town)}
-                  className={`cursor-pointer px-4 py-2.5 text-sm ${
+                  className={`cursor-pointer px-4 py-2.5 text-sm touch-manipulation ${
                     isHighlighted || isSelected
                       ? "bg-[var(--blush)] text-[var(--cocoa)]"
                       : "text-[var(--cocoa)] hover:bg-[var(--cream)]"
